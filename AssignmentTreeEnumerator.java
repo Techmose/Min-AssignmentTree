@@ -52,11 +52,11 @@ public class AssignmentTreeEnumerator {
         this.totalCalls += 1;
         this.totalTime += endTime-startTime;
 
-        BufferedWriter treeStat = new BufferedWriter(new FileWriter("orderTree_" + this.numCols + "X" + this.numRows + "_" + k +"_results.csv"));
-        treeStat.write("k,depth,cache_hits,solutions_cached\n");
+        BufferedWriter pqLog = new BufferedWriter(new FileWriter("pqSize_" + this.numCols + "X" + this.numRows + "_" + k +"_results.csv"));
+        pqLog.write("pqSize, k\n");
  
         BufferedWriter cacheHitLog = new BufferedWriter(new FileWriter("cache_hits_" + this.numCols + "X" + this.numRows + "_" + k + ".csv"));
-        cacheHitLog.write("k,node_label,depth,cols,cost,hit_count\n");
+        cacheHitLog.write("k,node_label,depth,cost,hit_count\n");
 
         int cost = cost(costMatrix,assignment);
         List<Integer> path = new ArrayList<Integer>();
@@ -64,18 +64,9 @@ public class AssignmentTreeEnumerator {
         pq.add(node);
 
         while (topK.size() < k && !pq.isEmpty()) {
-            if (topK.size()%1000 == 999){
-                for (int depth : callsByDepth.keySet()) {
-
-                    int hits = callsByDepth.getOrDefault(depth, 0);
-                    int solutions = cachedSolutions.getOrDefault(depth, 0);
-
-                    //treeStat.write(topK.size() + "," + depth + "," + hits + "," + solutions + "\n");
-                }    
-                treeStat.flush();
-                //System.out.println(topK.size());
-                //System.out.println("Cache Hits at Depth: " + this.callsByDepth);
-                //System.out.println("Solutions Cached at Depth: " + this.cachedSolutions + "\n");
+            if (pq.size()%5 == 0){
+                    pqLog.write(pq.size() + "," + topK.size() + "\n");
+                pqLog.flush();
             }
             node = pq.poll();
             if (node.path.size() == numRows) {
@@ -102,7 +93,7 @@ public class AssignmentTreeEnumerator {
                     List<Integer> sortedCols = new ArrayList<>(newCols);
                     java.util.Collections.sort(sortedCols);
                     //String colsStr = sortedCols.toString().replaceAll("\\s+", "");
-                    //cacheHitLog.write(topK.size() + "," + label + "," + newCols.size() + "," + totalCost + "," + entry[1] + "\n");
+                    cacheHitLog.write(topK.size() + "," + label + "," + newCols.size() + "," + totalCost + "," + entry[1] + "\n");
                 } else {
                     this.cacheMisses += 1;
                     int[][] newMatrix = subMatrix(newCols);
@@ -114,18 +105,18 @@ public class AssignmentTreeEnumerator {
                     this.totalTime += endTime-startTime;
 
                     solCost = cost(newMatrix,sol);
-                    if(newCols.size() > (this.numCols * (5.0/8.0))){
+                    //if(newCols.size() > (this.numCols * (5.0/8.0))){
                         cache.put(newCols, new int[]{solCost, 0});
                         nodeLabels.put(newCols, nextLabel++);
                         recordMatrixCached(newCols.size());
-                    }
+                    //}
                 }
                 int newCost = pathCost + solCost;
                 OrderTreeNode newNode = new OrderTreeNode(newCost,newPath);
                 pq.add(newNode);
             }
         }
-        treeStat.close();
+        pqLog.close();
         cacheHitLog.close();
         cacheOut.putAll(cache);
         return topK;

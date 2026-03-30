@@ -51,10 +51,28 @@ def plot_cache_hits(csv_file, output_dir):
         plt.savefig(filename, dpi=300, bbox_inches="tight")
         plt.close()
 
-        print(f"Min: {min_cost} Max: {max_cost}")
-        print(f"Saved: {filename}")
+        #print(f"Min: {min_cost} Max: {max_cost}")
+        #print(f"Saved: {filename}")
+
+def plot_pq_size(csv_file):
+    df = pd.read_csv(csv_file, low_memory=False, on_bad_lines="skip")
+
+    plt.figure()
+    plt.scatter(
+        df["k"],
+        df["pqSize"]
+    )
+
+    plt.xlabel("k - Solutions Found")
+    plt.ylabel("Queue Size")
+    plt.title("Priority Queue Size vs Solutions Found")
+
+    filename = "pqGraph.png"
+    plt.savefig(filename, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
-file = "cache_hits_10X10_3628800.csv"
-
-plot_cache_hits(file, "10x10_graphs")
+cache_file = "cache_hits_10X10_3628800.csv"
+pq_file = "pqSize_10X10_3628800_results.csv"
+#plot_cache_hits(cache_file, "10x10_graphs")
+plot_pq_size(pq_file)
