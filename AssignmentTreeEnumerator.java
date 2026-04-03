@@ -13,12 +13,13 @@ import java.util.Random;
 public class AssignmentTreeEnumerator {
     int[][] costMatrix;
     int numRows;
-    int numCols; 
+    int numCols;
 
     int cacheHits;
     int cacheMisses;
     public int totalCalls;
     long totalTime;
+    long cacheHitTime;
     Map<Integer, Integer> callsByDepth;
     Map<Integer, Integer> cachedSolutions;
 
@@ -31,17 +32,37 @@ public class AssignmentTreeEnumerator {
         this.cacheMisses = 0;
         this.totalCalls = 0;
         this.totalTime = 0;
+        this.cacheHitTime = 0;
 
         this.callsByDepth = new HashMap<>();
         this.cachedSolutions = new HashMap<>();
     }
 
-    public List<AssignmentResult> enumerate(int k, HashMap<HashSet<Integer>, int[]> cacheOut) throws IOException{
+    
+
+    public static class EnumerateConfig {
+        public boolean logging;       // write pqSize and cacheHit CSV logs
+        public boolean pqEviction;    // evict costliest nodes when pq > 2*k
+        public boolean customHash;    // placeholder
+        public boolean cacheEviction; // placeholder
+
+        public EnumerateConfig(boolean logging, boolean pqEviction, boolean customHash, boolean cacheEviction) {
+            this.logging = logging;
+            this.pqEviction = pqEviction;
+            this.customHash = customHash;
+            this.cacheEviction = cacheEviction;
+        }
+    }
+
+
+
+    public List<AssignmentResult> enumerate(int k, HashMap<HashSet<Integer>, int[]> cacheOut, EnumerateConfig config) throws IOException {
         List<AssignmentResult> topK = new ArrayList<>();
         PriorityQueue<OrderTreeNode> pq = new PriorityQueue<>();
-        // int[] stores {cost, hitCount}
+        // int[] stores {cost, hitCount} ******This should be removed in final
         HashMap<HashSet<Integer>, int[]> cache = new HashMap<>();
         HashMap<HashSet<Integer>, Integer> nodeLabels = new HashMap<>();
+        int upperBound = Integer.MAX_VALUE;
         int nextLabel = 1;
         cache.put(allCols(this.numCols), new int[]{0, 0});
         nodeLabels.put(allCols(this.numCols), nextLabel++);
@@ -50,24 +71,33 @@ public class AssignmentTreeEnumerator {
         int[] assignment = hungarianAlgo.solveHungarian(this.costMatrix);
         long endTime = System.nanoTime();
         this.totalCalls += 1;
-        this.totalTime += endTime-startTime;
+        this.totalTime += endTime - startTime;
 
-        BufferedWriter pqLog = new BufferedWriter(new FileWriter("pqSize_" + this.numCols + "X" + this.numRows + "_" + k +"_results.csv"));
-        pqLog.write("pqSize, k\n");
- 
-        BufferedWriter cacheHitLog = new BufferedWriter(new FileWriter("cache_hits_" + this.numCols + "X" + this.numRows + "_" + k + ".csv"));
-        cacheHitLog.write("k,node_label,depth,cost,hit_count\n");
+        // Only open log files if logging is enabled
+        BufferedWriter pqLog = null;
+        BufferedWriter cacheHitLog = null;
+        if (config.logging) {
+            pqLog = new BufferedWriter(new FileWriter("pqSize_" + this.numCols + "X" + this.numRows + "_" + k + "_results.csv"));
+            pqLog.write("pqSize,k\n");
+            cacheHitLog = new BufferedWriter(new FileWriter("cache_hits_" + this.numCols + "X" + this.numRows + "_" + k + ".csv"));
+            cacheHitLog.write("k,node_label,depth,cost,hit_count\n");
+        }
 
-        int cost = cost(costMatrix,assignment);
+        int cost = cost(costMatrix, assignment);
         List<Integer> path = new ArrayList<Integer>();
-        OrderTreeNode node = new OrderTreeNode(cost,path);
+        OrderTreeNode node = new OrderTreeNode(cost, path);
         pq.add(node);
 
         while (topK.size() < k && !pq.isEmpty()) {
-            if (pq.size()%5 == 0){
-                    pqLog.write(pq.size() + "," + topK.size() + "\n");
+            if (config.logging && pq.size() % 5 == 0) {
+                pqLog.write(pq.size() + "," + topK.size() + "\n");
                 pqLog.flush();
             }
+
+            if (config.pqEviction && pq.size() > 2 * k) {
+                evictCostliest(pq, depthUpperBound, k);
+            }
+
             node = pq.poll();
             if (node.path.size() == numRows) {
                 topK.add(node.result());
@@ -80,20 +110,25 @@ public class AssignmentTreeEnumerator {
                 newPath.add(col);
                 HashSet<Integer> newCols = new HashSet<Integer>(newPath);
 
-                int pathCost = cost(costMatrix,newPath);
+                int pathCost = cost(costMatrix, newPath);
                 int solCost = 0;
                 if (cache.containsKey(newCols)) {
                     this.cacheHits += 1;
                     this.recordHashCall(newCols.size());
+
+                    startTime = System.nanoTime();
                     int[] entry = cache.get(newCols);
+                    endTime = System.nanoTime();
+                    this.cacheHitTime += endTime - startTime;
+
                     solCost = entry[0];
-                    int totalCost = pathCost + solCost;
                     entry[1] += 1;
                     int label = nodeLabels.get(newCols);
                     List<Integer> sortedCols = new ArrayList<>(newCols);
                     java.util.Collections.sort(sortedCols);
-                    //String colsStr = sortedCols.toString().replaceAll("\\s+", "");
-                    cacheHitLog.write(topK.size() + "," + label + "," + newCols.size() + "," + totalCost + "," + entry[1] + "\n");
+                    if (config.logging) {
+                        cacheHitLog.write(topK.size() + "," + label + "," + newCols.size() + "," + solCost + "," + entry[1] + "\n");
+                    }
                 } else {
                     this.cacheMisses += 1;
                     int[][] newMatrix = subMatrix(newCols);
@@ -102,33 +137,101 @@ public class AssignmentTreeEnumerator {
                     int[] sol = hungarianAlgo.solveHungarian(newMatrix);
                     endTime = System.nanoTime();
                     this.totalCalls += 1;
-                    this.totalTime += endTime-startTime;
+                    this.totalTime += endTime - startTime;
 
-                    solCost = cost(newMatrix,sol);
-                    //if(newCols.size() > (this.numCols * (5.0/8.0))){
-                        cache.put(newCols, new int[]{solCost, 0});
-                        nodeLabels.put(newCols, nextLabel++);
-                        recordMatrixCached(newCols.size());
-                    //}
+                    solCost = cost(newMatrix, sol);
+                    cache.put(newCols, new int[]{solCost, 0});
+                    nodeLabels.put(newCols, nextLabel++);
+                    recordMatrixCached(newCols.size());
                 }
                 int newCost = pathCost + solCost;
-                OrderTreeNode newNode = new OrderTreeNode(newCost,newPath);
-                pq.add(newNode);
+
+                if (isBelowThreshold(newCost, newPath.size(), depthUpperBound)) {
+                    pq.add(new OrderTreeNode(newCost, newPath));
+                }
             }
         }
-        pqLog.close();
-        cacheHitLog.close();
+
+        if (config.logging) {
+            pqLog.close();
+            cacheHitLog.close();
+        }
         cacheOut.putAll(cache);
         return topK;
     }
-    //Number of cache hits at level k will be n! / (n - k)! - n-choose-k
-    public void recordHashCall(int depth){
+
+
+    /**
+     * Sorts the PQ by cost descending, removes the k most costly nodes,
+     * and sets the upper bound per depth to the cost of the k-th removed node.
+     */
+    private void evictCostliest(
+            PriorityQueue<OrderTreeNode> pq,
+            Map<Integer, Integer> depthUpperBound,
+            int k) {
+
+        List<OrderTreeNode> nodes = new ArrayList<>(pq);
+        nodes.sort((a, b) -> b.cost - a.cost);
+
+        // The k-th most costly node (last one removed) becomes the new bound
+        int newBound = nodes.get(k - 1).cost;
+
+        List<OrderTreeNode> surviving = nodes.subList(k, nodes.size());
+        pq.clear();
+        pq.addAll(surviving);
+
+        // Update per-depth upper bound — never loosen an existing tighter bound
+        for (OrderTreeNode n : surviving) {
+            depthUpperBound.merge(n.path.size(), newBound, Math::min);
+        }
+    }
+
+    /**
+     * Returns true if no bound exists yet for this depth, or cost is below it.
+     */
+    private boolean isBelowThreshold(int cost, int depth, Map<Integer, Integer> depthUpperBound) {
+        return !depthUpperBound.containsKey(depth) || cost < depthUpperBound.get(depth);
+    }
+
+    // -------------------------------------------------------------------------
+    // Stats
+    // -------------------------------------------------------------------------
+
+    public void recordHashCall(int depth) {
         callsByDepth.put(depth, callsByDepth.getOrDefault(depth, 0) + 1);
     }
-    //Number of cache entries will be n-choose-k
-    public void recordMatrixCached(int depth){
+
+    public void recordMatrixCached(int depth) {
         cachedSolutions.put(depth, cachedSolutions.getOrDefault(depth, 0) + 1);
     }
+
+    public void printCacheStats() {
+        System.out.printf("cache hits:      %d\n", this.cacheHits);
+        System.out.printf("cache misses:    %d\n", this.cacheMisses);
+        System.out.printf("cache hit time:  %.4f (%d hits)\n", this.cacheHitTime * 1e-9, this.cacheHits);
+        System.out.printf("hungarian time:  %.4f (%d calls)\n", this.totalTime * 1e-9, this.totalCalls);
+    }
+
+    public void printPerEntryCacheStats(HashMap<HashSet<Integer>, int[]> cache) {
+        System.out.println("\n--- Per-Entry Cache Hit Counts ---");
+        Map<Integer, List<int[]>> byDepth = new HashMap<>();
+        for (Map.Entry<HashSet<Integer>, int[]> entry : cache.entrySet()) {
+            int depth = entry.getKey().size();
+            byDepth.computeIfAbsent(depth, d -> new ArrayList<>()).add(entry.getValue());
+        }
+        for (int depth : new java.util.TreeSet<>(byDepth.keySet())) {
+            List<int[]> entries = byDepth.get(depth);
+            int totalHits = entries.stream().mapToInt(e -> e[1]).sum();
+            long neverHit = entries.stream().filter(e -> e[1] == 0).count();
+            int maxHits = entries.stream().mapToInt(e -> e[1]).max().orElse(0);
+            System.out.printf("depth %2d: %3d entries | total hits: %5d | max hits on one entry: %4d | never hit: %3d\n",
+                depth, entries.size(), totalHits, maxHits, neverHit);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
 
     static int cost(int[][] matrix, int[] assignment) {
         int cost = 0;
@@ -152,11 +255,9 @@ public class AssignmentTreeEnumerator {
     }
 
     int[][] subMatrix(HashSet<Integer> cols) {
-        // cols contains set of assigned columns
         int colsSize = cols.size();
-        // # of assigned rows == # of assigned columns
-        int rowsLeft = this.numRows-colsSize;
-        int colsLeft = this.numCols-colsSize;
+        int rowsLeft = this.numRows - colsSize;
+        int colsLeft = this.numCols - colsSize;
         int[][] matrix = new int[rowsLeft][colsLeft];
         int i = 0;
         for (int row = colsSize; row < this.numRows; row++) {
@@ -171,34 +272,11 @@ public class AssignmentTreeEnumerator {
         return matrix;
     }
 
-    public void printCacheStats() {
-        System.out.printf("cache hits: %d\n", this.cacheHits);
-        System.out.printf("cache miss: %d\n", this.cacheMisses);
-        System.out.printf("hungarian time: %.4f (%d calls)\n", this.totalTime*1e-9, this.totalCalls);
-    }
-
-    public void printPerEntryCacheStats(HashMap<HashSet<Integer>, int[]> cache) {
-        System.out.println("\n--- Per-Entry Cache Hit Counts ---");
-        // Group entries by depth (set size) for readability
-        Map<Integer, List<int[]>> byDepth = new HashMap<>();
-        for (Map.Entry<HashSet<Integer>, int[]> entry : cache.entrySet()) {
-            int depth = entry.getKey().size();
-            byDepth.computeIfAbsent(depth, d -> new ArrayList<>()).add(entry.getValue());
-        }
-        for (int depth : new java.util.TreeSet<>(byDepth.keySet())) {
-            List<int[]> entries = byDepth.get(depth);
-            int totalHits = entries.stream().mapToInt(e -> e[1]).sum();
-            long neverHit = entries.stream().filter(e -> e[1] == 0).count();
-            int maxHits = entries.stream().mapToInt(e -> e[1]).max().orElse(0);
-            System.out.printf("depth %2d: %3d entries | total hits: %5d | max hits on one entry: %4d | never hit: %3d\n",
-                depth, entries.size(), totalHits, maxHits, neverHit);
-        }
-    }
+    // -------------------------------------------------------------------------
+    // Main
+    // -------------------------------------------------------------------------
 
     public static void main(String[] args) throws IOException {
-
-        //int N = 5;
-
 
         /*
         int[][] costMatrix = new int[][] {
@@ -235,7 +313,8 @@ public class AssignmentTreeEnumerator {
             {5,9,4,4,6,4,4,3,4}};
         int k = 362880;
         */
-       /* 
+
+        /*
         int[][] costMatrix = new int[][] {
         {3,7,2,8,1,5,9,4,6,0,3,7,2,8,5,1,4,9,6,0},
         {6,1,8,3,9,4,0,7,2,5,6,1,8,3,9,4,0,7,2,5},
@@ -258,7 +337,8 @@ public class AssignmentTreeEnumerator {
         {9,3,7,5,4,1,4,0,6,2,9,3,7,5,4,1,4,0,6,2},
         {2,0,1,8,6,4,7,9,3,5,2,0,1,8,6,4,7,9,3,5}};
         */
-        /* 
+
+        /*
         int[][] costMatrix = new int[][] {
             {5,0,3,3,7,9,3,5,2,4},
             {7,6,8,8,1,6,7,7,8,1},
@@ -271,42 +351,36 @@ public class AssignmentTreeEnumerator {
             {4,4,8,4,3,7,5,5,0,1},
             {5,9,3,0,5,0,1,2,4,2}};
         */
-        int n = 10;
-        int k = 3628800;
-        //int k = 100000;
+
+        int n = 20;
+        int k = 1000000;
 
         Random rand = new Random();
         int[][] costMatrix = new int[n][n];
-
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                costMatrix[i][j] = rand.nextInt(9999); // 0–9999
-            }
-        }
+        for (int i = 0; i < n; i++)
+            for (int j = 0; j < n; j++)
+                costMatrix[i][j] = rand.nextInt(9999);
 
         System.out.println("Generated Matrix:");
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < n; i++)
             System.out.println(java.util.Arrays.toString(costMatrix[i]));
-        }
 
         AssignmentTreeEnumerator enumerator = new AssignmentTreeEnumerator(costMatrix);
+
+        EnumerateConfig config = new EnumerateConfig(
+            true,   // logging
+            true,   // pqEviction
+            false,  // customHash (placeholder)
+            false   // cacheEviction (placeholder)
+        );
 
         System.out.println("enumerating...");
         long start = System.nanoTime();
         HashMap<HashSet<Integer>, int[]> cache = new HashMap<>();
-        List<AssignmentResult> topK = enumerator.enumerate(k, cache);
+        List<AssignmentResult> topK = enumerator.enumerate(k, cache, config);
         long end = System.nanoTime();
-        System.out.printf("timer: %.4f\n", ((end-start)*1e-9));
+        System.out.printf("timer: %.4f\n", ((end - start) * 1e-9));
 
-        /*
-        System.out.println(java.util.Arrays.deepToString(costMatrix));
-        for (int i = 0; i < 10; i++) {
-            System.out.println(topK.get(i));
-        }
-        for (int i = 0; i < 10; i++) {
-            System.out.println(topK.get(topK.size()-i-1));
-        }
-        */
         enumerator.printCacheStats();
         enumerator.printPerEntryCacheStats(cache);
         System.out.print("Final Count: " + enumerator.callsByDepth);
@@ -350,9 +424,6 @@ class OrderTreeNode implements Comparable<OrderTreeNode> {
     }
 
     public AssignmentResult result() {
-        List<Integer> path = new ArrayList<Integer>(this.path);
-        int cost = this.cost;
-        return new AssignmentResult(path,cost);
-
+        return new AssignmentResult(new ArrayList<>(this.path), this.cost);
     }
 }

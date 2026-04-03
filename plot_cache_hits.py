@@ -66,13 +66,13 @@ def plot_pq_size(csv_file):
     plt.xlabel("k - Solutions Found")
     plt.ylabel("Queue Size")
     plt.title("Priority Queue Size vs Solutions Found")
-
+    plt.plot((0,df["k"].max()), (0,df["k"].max()))
     filename = "pqGraph.png"
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     plt.close()
 
 
-cache_file = "cache_hits_10X10_3628800.csv"
-pq_file = "pqSize_10X10_3628800_results.csv"
-#plot_cache_hits(cache_file, "10x10_graphs")
+cache_file = "cache_hits_20X20_1000000.csv"
+pq_file = "pqSize_20X20_1000000_results.csv"
+#plot_cache_hits(cache_file, "20x20_graphs_solutionCost")
 plot_pq_size(pq_file)
