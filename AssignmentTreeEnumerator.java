@@ -22,6 +22,7 @@ public class AssignmentTreeEnumerator {
     long cacheHitTime;
     Map<Integer, Integer> callsByDepth;
     Map<Integer, Integer> cachedSolutions;
+    int maxCacheSize;
 
     public AssignmentTreeEnumerator(int[][] costMatrix) {
         this.costMatrix = costMatrix;
@@ -36,9 +37,12 @@ public class AssignmentTreeEnumerator {
 
         this.callsByDepth = new HashMap<>();
         this.cachedSolutions = new HashMap<>();
+        this.maxCacheSize = (int) (nCr(this.numCols, this.numCols / 2));
     }
 
-    
+    // -------------------------------------------------------------------------
+    // Config
+    // -------------------------------------------------------------------------
 
     public static class EnumerateConfig {
         public boolean logging;       // write pqSize and cacheHit CSV logs
@@ -54,18 +58,21 @@ public class AssignmentTreeEnumerator {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Enumerate
+    // -------------------------------------------------------------------------
 
-
-    public List<AssignmentResult> enumerate(int k, HashMap<HashSet<Integer>, int[]> cacheOut, EnumerateConfig config) throws IOException {
+    public List<AssignmentResult> enumerate(int k, HashMap<ColSet, int[]> cacheOut, EnumerateConfig config) throws IOException {
         List<AssignmentResult> topK = new ArrayList<>();
         PriorityQueue<OrderTreeNode> pq = new PriorityQueue<>();
-        // int[] stores {cost, hitCount} ******This should be removed in final
-        HashMap<HashSet<Integer>, int[]> cache = new HashMap<>();
-        HashMap<HashSet<Integer>, Integer> nodeLabels = new HashMap<>();
+        // int[] stores {cost, hitCount}
+        HashMap<ColSet, int[]> cache = new HashMap<>();
+        HashMap<ColSet, Integer> nodeLabels = new HashMap<>();
         int upperBound = Integer.MAX_VALUE;
         int nextLabel = 1;
-        cache.put(allCols(this.numCols), new int[]{0, 0});
-        nodeLabels.put(allCols(this.numCols), nextLabel++);
+        ColSet allColsSet = allCols(this.numCols);
+        cache.put(allColsSet, new int[]{0, 0});
+        nodeLabels.put(allColsSet, nextLabel++);
 
         long startTime = System.nanoTime();
         int[] assignment = hungarianAlgo.solveHungarian(this.costMatrix);
@@ -85,7 +92,7 @@ public class AssignmentTreeEnumerator {
 
         int cost = cost(costMatrix, assignment);
         List<Integer> path = new ArrayList<Integer>();
-        OrderTreeNode node = new OrderTreeNode(cost, path);
+        OrderTreeNode node = new OrderTreeNode(cost, path, new ColSet());
         pq.add(node);
 
         while (topK.size() < k && !pq.isEmpty()) {
@@ -95,7 +102,7 @@ public class AssignmentTreeEnumerator {
             }
 
             if (config.pqEviction && pq.size() > 2 * k) {
-                evictCostliest(pq, depthUpperBound, k);
+                upperBound = Math.min(upperBound, evictCostliest(pq, k));
             }
 
             node = pq.poll();
@@ -103,12 +110,12 @@ public class AssignmentTreeEnumerator {
                 topK.add(node.result());
                 continue;
             }
-            HashSet<Integer> cols = new HashSet<Integer>(node.path);
+            ColSet cols = node.colSet;
             for (int col = 0; col < this.numCols; col++) {
                 if (cols.contains(col)) continue;
                 List<Integer> newPath = new ArrayList<Integer>(node.path);
                 newPath.add(col);
-                HashSet<Integer> newCols = new HashSet<Integer>(newPath);
+                ColSet newCols = new ColSet(cols, col);
 
                 int pathCost = cost(costMatrix, newPath);
                 int solCost = 0;
@@ -124,8 +131,6 @@ public class AssignmentTreeEnumerator {
                     solCost = entry[0];
                     entry[1] += 1;
                     int label = nodeLabels.get(newCols);
-                    List<Integer> sortedCols = new ArrayList<>(newCols);
-                    java.util.Collections.sort(sortedCols);
                     if (config.logging) {
                         cacheHitLog.write(topK.size() + "," + label + "," + newCols.size() + "," + solCost + "," + entry[1] + "\n");
                     }
@@ -143,11 +148,15 @@ public class AssignmentTreeEnumerator {
                     cache.put(newCols, new int[]{solCost, 0});
                     nodeLabels.put(newCols, nextLabel++);
                     recordMatrixCached(newCols.size());
+
+                    if (config.cacheEviction) {
+                        evictCache(cache, nodeLabels);
+                    }
                 }
                 int newCost = pathCost + solCost;
 
-                if (isBelowThreshold(newCost, newPath.size(), depthUpperBound)) {
-                    pq.add(new OrderTreeNode(newCost, newPath));
+                if (isBelowThreshold(newCost, upperBound)) {
+                    pq.add(new OrderTreeNode(newCost, newPath, newCols));
                 }
             }
         }
@@ -160,37 +169,65 @@ public class AssignmentTreeEnumerator {
         return topK;
     }
 
-
     /**
      * Sorts the PQ by cost descending, removes the k most costly nodes,
-     * and sets the upper bound per depth to the cost of the k-th removed node.
+     * and returns the cost of the k-th removed node as the new global upper bound.
      */
-    private void evictCostliest(
-            PriorityQueue<OrderTreeNode> pq,
-            Map<Integer, Integer> depthUpperBound,
-            int k) {
-
+    private int evictCostliest(PriorityQueue<OrderTreeNode> pq, int k) {
         List<OrderTreeNode> nodes = new ArrayList<>(pq);
         nodes.sort((a, b) -> b.cost - a.cost);
 
         // The k-th most costly node (last one removed) becomes the new bound
         int newBound = nodes.get(k - 1).cost;
 
-        List<OrderTreeNode> surviving = nodes.subList(k, nodes.size());
         pq.clear();
-        pq.addAll(surviving);
+        pq.addAll(nodes.subList(k, nodes.size()));
 
-        // Update per-depth upper bound — never loosen an existing tighter bound
-        for (OrderTreeNode n : surviving) {
-            depthUpperBound.merge(n.path.size(), newBound, Math::min);
+        return newBound;
+    }
+
+    /**
+     * Returns true if cost is below the global upper bound.
+     */
+    private boolean isBelowThreshold(int cost, int upperBound) {
+        return cost < upperBound;
+    }
+
+    // -------------------------------------------------------------------------
+    // Cache Eviction
+    // -------------------------------------------------------------------------
+
+    /**
+     * Evicts the least-frequently-used cache entries when the cache exceeds
+     * maxCacheSize = C(n, n/2) / 2. Keeps the top half by hitCount.
+     */
+    private void evictCache(HashMap<ColSet, int[]> cache,
+                            HashMap<ColSet, Integer> nodeLabels) {
+        if (cache.size() <= maxCacheSize) return;
+
+        List<Map.Entry<ColSet, int[]>> entries = new ArrayList<>(cache.entrySet());
+        entries.sort((a, b) -> a.getValue()[1] - b.getValue()[1]);
+
+        int toEvict = (int) Math.ceil(cache.size() * 0.10);
+        for (int i = 0; i < toEvict; i++) {
+            ColSet key = entries.get(i).getKey();
+            cache.remove(key);
+            nodeLabels.remove(key);
         }
     }
 
     /**
-     * Returns true if no bound exists yet for this depth, or cost is below it.
+     * Computes n choose r.
      */
-    private boolean isBelowThreshold(int cost, int depth, Map<Integer, Integer> depthUpperBound) {
-        return !depthUpperBound.containsKey(depth) || cost < depthUpperBound.get(depth);
+    private static long nCr(int n, int r) {
+        if (r > n) return 0;
+        if (r == 0 || r == n) return 1;
+        r = Math.min(r, n - r);
+        long result = 1;
+        for (int i = 0; i < r; i++) {
+            result = result * (n - i) / (i + 1);
+        }
+        return result;
     }
 
     // -------------------------------------------------------------------------
@@ -212,10 +249,10 @@ public class AssignmentTreeEnumerator {
         System.out.printf("hungarian time:  %.4f (%d calls)\n", this.totalTime * 1e-9, this.totalCalls);
     }
 
-    public void printPerEntryCacheStats(HashMap<HashSet<Integer>, int[]> cache) {
+    public void printPerEntryCacheStats(HashMap<ColSet, int[]> cache) {
         System.out.println("\n--- Per-Entry Cache Hit Counts ---");
         Map<Integer, List<int[]>> byDepth = new HashMap<>();
-        for (Map.Entry<HashSet<Integer>, int[]> entry : cache.entrySet()) {
+        for (Map.Entry<ColSet, int[]> entry : cache.entrySet()) {
             int depth = entry.getKey().size();
             byDepth.computeIfAbsent(depth, d -> new ArrayList<>()).add(entry.getValue());
         }
@@ -247,14 +284,14 @@ public class AssignmentTreeEnumerator {
         return cost;
     }
 
-    static HashSet<Integer> allCols(int numCols) {
+    static ColSet allCols(int numCols) {
         HashSet<Integer> all = new HashSet<Integer>(numCols);
         for (int col = 0; col < numCols; col++)
             all.add(col);
-        return all;
+        return new ColSet(all);
     }
 
-    int[][] subMatrix(HashSet<Integer> cols) {
+    int[][] subMatrix(ColSet cols) {
         int colsSize = cols.size();
         int rowsLeft = this.numRows - colsSize;
         int colsLeft = this.numCols - colsSize;
@@ -376,7 +413,7 @@ public class AssignmentTreeEnumerator {
 
         System.out.println("enumerating...");
         long start = System.nanoTime();
-        HashMap<HashSet<Integer>, int[]> cache = new HashMap<>();
+        HashMap<ColSet, int[]> cache = new HashMap<>();
         List<AssignmentResult> topK = enumerator.enumerate(k, cache, config);
         long end = System.nanoTime();
         System.out.printf("timer: %.4f\n", ((end - start) * 1e-9));
@@ -391,11 +428,13 @@ public class AssignmentTreeEnumerator {
 class OrderTreeNode implements Comparable<OrderTreeNode> {
     int cost;
     List<Integer> path;
+    ColSet colSet;
     int length;
 
-    public OrderTreeNode(int cost, List<Integer> path) {
+    public OrderTreeNode(int cost, List<Integer> path, ColSet colSet) {
         this.cost = cost;
         this.path = path;
+        this.colSet = colSet;
         this.length = path.size();
     }
 
