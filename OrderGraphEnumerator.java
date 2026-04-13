@@ -84,6 +84,7 @@ class EnumeratorLogger {
     private PrintWriter cacheHitsWriter;
     private PrintWriter pqSizeWriter;
     private PrintWriter cacheSizeWriter;
+    private PrintWriter timingsWriter;
 
     /**
      * @param mode       Logging mode from config.
@@ -114,6 +115,9 @@ class EnumeratorLogger {
             this.cacheSizeWriter = openWriter("cacheSize");
             this.cacheSizeWriter.println("k,size");
 
+            this.timingsWriter = openWriter("timings");
+            this.timingsWriter.println("k,hungarian_time,cache_time,eviction_time,pq_eviction_time");
+
             if (this.mode == LoggingMode.ALL) {
                 this.cacheHitsWriter = openWriter("cacheHits");
                 this.cacheHitsWriter.println("k,depth,nodeLabel,hits");
@@ -128,9 +132,28 @@ class EnumeratorLogger {
         closeWriter(this.pqSizeWriter);
         closeWriter(this.cacheSizeWriter);
         closeWriter(this.cacheHitsWriter);
+        closeWriter(this.timingsWriter);
         this.pqSizeWriter    = null;
         this.cacheSizeWriter = null;
         this.cacheHitsWriter = null;
+        this.timingsWriter   = null;
+    }
+
+    /**
+     * Log one row to timings.csv. Called once per iteration.
+     * All time values are per-iteration deltas in nanoseconds.
+     *
+     * @param iteration       Current outer-loop iteration count.
+     * @param hungarianTime   Nanoseconds spent in Hungarian algorithm this iteration.
+     * @param cacheTime       Nanoseconds spent on hashing/cache lookups this iteration.
+     * @param evictionTime    Nanoseconds spent on cache eviction this iteration.
+     * @param pqEvictionTime  Nanoseconds spent on PQ pruning this iteration.
+     */
+    public void logTimings(int iteration, long hungarianTime, long cacheTime,
+                           long evictionTime, long pqEvictionTime) {
+        if (this.timingsWriter == null) return;
+        this.timingsWriter.printf("%d,%d,%d,%d,%d%n",
+            iteration, hungarianTime, cacheTime, evictionTime, pqEvictionTime);
     }
 
     /** Log one row to pqSize.csv. Called once per iteration after PQ operations. */
@@ -244,6 +267,13 @@ public class OrderGraphEnumerator {
         // iteration counter: increments once per pq.poll()
         int iteration = 0;
 
+        // snapshots of cumulative timers at the start of each iteration,
+        // used to compute per-iteration deltas for the timings CSV
+        long prevHungarianTime  = this.totalTime;
+        long prevCacheTime      = this.cache.hashingTime;
+        long prevEvictionTime   = this.cache.cacheEvictionTime;
+        long prevPqEvictionTime = this.pqPruningTime;
+
         while (topK.size() < k && !pq.isEmpty()) {
             // pop best solution
             node = pq.poll();
@@ -321,6 +351,21 @@ public class OrderGraphEnumerator {
             // log PQ and cache sizes once per iteration
             logger.logPQSize(iteration, pq.size());
             logger.logCacheSize(iteration, this.cache.size());
+
+            // log per-iteration timing deltas
+            long curHungarian  = this.totalTime;
+            long curCache      = this.cache.hashingTime;
+            long curEviction   = this.cache.cacheEvictionTime;
+            long curPqEviction = this.pqPruningTime;
+            logger.logTimings(iteration,
+                curHungarian  - prevHungarianTime,
+                curCache      - prevCacheTime,
+                curEviction   - prevEvictionTime,
+                curPqEviction - prevPqEvictionTime);
+            prevHungarianTime  = curHungarian;
+            prevCacheTime      = curCache;
+            prevEvictionTime   = curEviction;
+            prevPqEvictionTime = curPqEviction;
         }
 
         logger.close();

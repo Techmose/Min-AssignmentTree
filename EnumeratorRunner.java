@@ -38,13 +38,13 @@ public class EnumeratorRunner {
         // Each row: { pqReduction, cacheEviction, customHashing, logging }
         boolean[][] flags = {
             { false, false, false, false },  // FFFF
-            //{ true,  false, false, false },  // TFFF
+            { true,  false, false, false },  // TFFF
             //{ false, false, true,  false },  // FFTF
             //{ true, false, true, false  },  // TFTF
             //{ false, true,  false, false },  // FTFF
             //{ true,  true,  true,  false },  // TTTF
             { false, false, false, true  },  // FFFT
-            { true,  true,  true,  true  },  // TTTT
+            { true,  false,  false,  true  },  // TFFT
         };
 
         System.out.printf("%-6s  %10s  %10s  %10s  %10s  %10s  %8s  %8s%n",

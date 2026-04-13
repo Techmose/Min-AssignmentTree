@@ -60,7 +60,7 @@ def plot_pq_size(csv_file):
     plt.figure()
     plt.scatter(
         df["k"],
-        df["pqSize"]
+        df["size"]
     )
 
     plt.xlabel("k - Solutions Found")
@@ -73,6 +73,6 @@ def plot_pq_size(csv_file):
 
 
 cache_file = "cache_hits_20X20_1000000.csv"
-pq_file = "pqSize_20X20_1000000_results.csv"
+pq_file = "pqSize_k1000000_FFF.csv"
 #plot_cache_hits(cache_file, "20x20_graphs_solutionCost")
 plot_pq_size(pq_file)
