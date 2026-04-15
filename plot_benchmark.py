@@ -31,8 +31,8 @@ OUTPUT_DIR  = "."          # directory to save plots
 
 # Line style per config label — add entries here if you add more configs
 STYLES = {
-    "OG_FFFF": {"color": "#1f77b4", "marker": "o", "linestyle": "-",  "label": "OG baseline (FFFF)"},
-    "OG_TFFF": {"color": "#ff7f0e", "marker": "s", "linestyle": "--", "label": "OG cache eviction (TFFF)"},
+    "OG_FFFF": {"color": "#1f77b4", "marker": "o", "linestyle": "-",  "label": "OG baseline"},
+    "OG_TFFF": {"color": "#ff7f0e", "marker": "s", "linestyle": "--", "label": "OG priority queue eviction"},
     "MURTY":   {"color": "#2ca02c", "marker": "^", "linestyle": ":",  "label": "Murty"},
 }
 

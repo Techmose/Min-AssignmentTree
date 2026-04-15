@@ -26,8 +26,16 @@ public class Benchmark {
     // =========================================================================
     // CONFIGURE: matrix sizes to benchmark
     // =========================================================================
-    static final int[] N_VALUES = { 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40};
+    static final int MAX_N = 200;
 
+    static final int[] N_VALUES = buildNValues(MAX_N);
+
+    static int[] buildNValues(int maxN) {
+        java.util.List<Integer> vals = new java.util.ArrayList<>();
+        for (int n = 2; n <= maxN; n += 2)
+            vals.add(n);
+        return vals.stream().mapToInt(Integer::intValue).toArray();
+    }
     // =========================================================================
     // CONFIGURE: solution counts to benchmark (applied to every N above)
     // =========================================================================
