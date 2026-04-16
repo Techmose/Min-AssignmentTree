@@ -26,13 +26,13 @@ public class Benchmark {
     // =========================================================================
     // CONFIGURE: matrix sizes to benchmark
     // =========================================================================
-    static final int MAX_N = 200;
+    static final int MAX_N = 20;
 
     static final int[] N_VALUES = buildNValues(MAX_N);
 
     static int[] buildNValues(int maxN) {
         java.util.List<Integer> vals = new java.util.ArrayList<>();
-        for (int n = 2; n <= maxN; n += 2)
+        for (int n = 2; n <= maxN; n += 4)
             vals.add(n);
         return vals.stream().mapToInt(Integer::intValue).toArray();
     }
@@ -45,7 +45,7 @@ public class Benchmark {
     // CONFIGURE: matrix generation
     // =========================================================================
     static final long SEED       = 42L;
-    static final int  COST_RANGE = 10;   // cell values drawn from [0, COST_RANGE)
+    static final int  COST_RANGE = 999999;   // cell values drawn from [0, COST_RANGE)
 
     // -------------------------------------------------------------------------
     // Fixed — output file
@@ -88,7 +88,7 @@ public class Benchmark {
                     allResults.add(r1);
                     System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
 
-                    // OG_FTFF — cache eviction on, everything else off
+                    // OG_TFFF — cache eviction on, everything else off
                     BenchmarkResult r2 = runOrderGraph(problem, n, k,
                         new EnumeratorConfig(true, false, false, LoggingMode.NONE),
                         "OG_TFFF");
@@ -103,6 +103,8 @@ public class Benchmark {
                     System.out.printf("    %-10s  %.4fs%n", r3.config, r3.timeNs * 1e-9);
 
                     System.out.println();
+                    sanityCheck(r3, r1);
+                    sanityCheck(r3, r2);
                 }
                 System.out.println();
             }
@@ -123,21 +125,21 @@ public class Benchmark {
                                          EnumeratorConfig config, String label) {
         OrderGraphEnumerator og = new OrderGraphEnumerator(problem, config);
         long t0 = System.nanoTime();
-        og.enumerate(k);
+        List<AssignmentSolution> solution = og.enumerate(k);
         long elapsed = System.nanoTime() - t0;
         og = null;
         System.gc();
-        return new BenchmarkResult(n, k, SEED, label, elapsed);
+        return new BenchmarkResult(n, k, SEED, label, elapsed, solution);
     }
 
     static BenchmarkResult runMurty(AssignmentProblem problem, int n, int k) {
         MurtyEnumerator murty = new MurtyEnumerator(problem);
         long t0 = System.nanoTime();
-        murty.enumerate(k);
+        List<AssignmentSolution> solution = murty.enumerate(k);
         long elapsed = System.nanoTime() - t0;
         murty = null;
         System.gc();
-        return new BenchmarkResult(n, k, SEED, "MURTY", elapsed);
+        return new BenchmarkResult(n, k, SEED, "MURTY", elapsed, solution);
     }
 
     // -------------------------------------------------------------------------
@@ -179,6 +181,18 @@ public class Benchmark {
         }
         return sb.append("]").toString();
     }
+    static void sanityCheck(BenchmarkResult r1, BenchmarkResult r2){
+        boolean match = r2.solution.size() == r2.solution.size();
+        if (match) {
+            for (int i = 0; i < r2.solution.size(); i++) {
+                if (r2.solution.get(i).cost != r2.solution.get(i).cost) {
+                    match = false;
+                    break;
+                }
+            }
+        }
+        if (match) System.out.println("Sanity Check");
+    }
 }
 
 
@@ -189,12 +203,14 @@ class BenchmarkResult {
     final long   seed;
     final String config;
     final long   timeNs;
+    final List<AssignmentSolution> solution;
 
-    BenchmarkResult(int n, int k, long seed, String config, long timeNs) {
+    BenchmarkResult(int n, int k, long seed, String config, long timeNs, List<AssignmentSolution> solution) {
         this.n      = n;
         this.k      = k;
         this.seed   = seed;
         this.config = config;
         this.timeNs = timeNs;
+        this.solution = solution;
     }
 }

@@ -568,11 +568,14 @@ class OrderGraphNode implements Comparable<OrderGraphNode> {
     int cost;
     List<Integer> path;
     int length;
+    int id;
+    static int id_counter = 0;
 
     public OrderGraphNode(int cost, List<Integer> path) {
         this.cost   = cost;
         this.path   = path;
         this.length = path.size();
+        this.id = OrderGraphNode.id_counter++;
     }
 
     /**
@@ -586,9 +589,14 @@ class OrderGraphNode implements Comparable<OrderGraphNode> {
             if (this.length > other.length)       return -1;
             else if (this.length < other.length)  return  1;
             else {
+                /*
                 for (int i = 0; i < this.length; i++)
                     if (this.path.get(i) < other.path.get(i))       return -1;
                     else if (this.path.get(i) > other.path.get(i))  return  1;
+                return 0;
+                 */
+                if (this.id > other.id)         return 1;
+                else if (this.id < other.id)    return -1;
                 return 0;
             }
         }
