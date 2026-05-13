@@ -26,13 +26,13 @@ public class Benchmark {
     // =========================================================================
     // CONFIGURE: matrix sizes to benchmark
     // =========================================================================
-    static final int MAX_N = 20;
+    static final int MAX_N = 40;
 
     static final int[] N_VALUES = buildNValues(MAX_N);
 
     static int[] buildNValues(int maxN) {
         java.util.List<Integer> vals = new java.util.ArrayList<>();
-        for (int n = 2; n <= maxN; n += 4)
+        for (int n = 30; n <= maxN; n += 5)
             vals.add(n);
         return vals.stream().mapToInt(Integer::intValue).toArray();
     }

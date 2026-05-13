@@ -85,6 +85,9 @@ class EnumeratorLogger {
     private PrintWriter pqSizeWriter;
     private PrintWriter cacheSizeWriter;
     private PrintWriter timingsWriter;
+    private PrintWriter cacheGetTimeWriter;
+    private PrintWriter cachePutTimeWriter;
+    private PrintWriter cacheContainsTimeWriter;
 
     /**
      * @param mode       Logging mode from config.
@@ -118,6 +121,15 @@ class EnumeratorLogger {
             this.timingsWriter = openWriter("timings");
             this.timingsWriter.println("k,hungarian_time,cache_time,eviction_time,pq_eviction_time");
 
+            this.cacheGetTimeWriter = openWriter("cacheGetTime");
+            this.cacheGetTimeWriter.println("k,get_time_ns");
+
+            this.cachePutTimeWriter = openWriter("cachePutTime");
+            this.cachePutTimeWriter.println("k,put_time_ns");
+
+            this.cacheContainsTimeWriter = openWriter("cacheContainsTime");
+            this.cacheContainsTimeWriter.println("k,contains_time_ns");
+
             if (this.mode == LoggingMode.ALL) {
                 this.cacheHitsWriter = openWriter("cacheHits");
                 this.cacheHitsWriter.println("k,depth,nodeLabel,hits");
@@ -133,10 +145,16 @@ class EnumeratorLogger {
         closeWriter(this.cacheSizeWriter);
         closeWriter(this.cacheHitsWriter);
         closeWriter(this.timingsWriter);
-        this.pqSizeWriter    = null;
-        this.cacheSizeWriter = null;
-        this.cacheHitsWriter = null;
-        this.timingsWriter   = null;
+        closeWriter(this.cacheGetTimeWriter);
+        closeWriter(this.cachePutTimeWriter);
+        closeWriter(this.cacheContainsTimeWriter);
+        this.pqSizeWriter            = null;
+        this.cacheSizeWriter         = null;
+        this.cacheHitsWriter         = null;
+        this.timingsWriter           = null;
+        this.cacheGetTimeWriter      = null;
+        this.cachePutTimeWriter      = null;
+        this.cacheContainsTimeWriter = null;
     }
 
     /**
@@ -180,6 +198,25 @@ class EnumeratorLogger {
     public void logCacheHit(int iteration, int depth, int colIndex, int hits) {
         if (this.cacheHitsWriter == null) return;
         this.cacheHitsWriter.printf("%d,%d,%d,%d%n", iteration, depth, colIndex, hits);
+    }
+
+    /**
+     * Log one row to each cache-operation timing CSV. Called once per iteration.
+     * Values are per-iteration deltas in nanoseconds, matching the pattern used
+     * by logTimings() so the CSVs can be joined on the k column.
+     *
+     * @param iteration    Current outer-loop iteration count.
+     * @param getTimeNs    Nanoseconds spent in HashMap.get() this iteration.
+     * @param putTimeNs    Nanoseconds spent in HashMap.put() this iteration.
+     * @param containsNs   Nanoseconds spent in HashMap.containsKey() this iteration.
+     */
+    public void logCacheOpTimes(int iteration, long getTimeNs, long putTimeNs, long containsNs) {
+        if (this.cacheGetTimeWriter != null)
+            this.cacheGetTimeWriter.printf("%d,%d%n", iteration, getTimeNs);
+        if (this.cachePutTimeWriter != null)
+            this.cachePutTimeWriter.printf("%d,%d%n", iteration, putTimeNs);
+        if (this.cacheContainsTimeWriter != null)
+            this.cacheContainsTimeWriter.printf("%d,%d%n", iteration, containsNs);
     }
 
     private PrintWriter openWriter(String name) throws IOException {
@@ -255,10 +292,9 @@ public class OrderGraphEnumerator {
         // initial call to Hungarian algorithm
         AssignmentSolution solution = callHungarian(this.problem.costMatrix);
 
-        // initialize priority queue
+        // initialize priority queue with the root node (empty usedCols, no parent)
         PriorityQueue<OrderGraphNode> pq = new PriorityQueue<>();
-        List<Integer> path = new ArrayList<Integer>();
-        OrderGraphNode node = new OrderGraphNode(solution.cost, path);
+        OrderGraphNode node = new OrderGraphNode(solution.cost, this.problem.numCols);
         pq.add(node);
 
         // persisted lower bound for PQ reduction; Integer.MAX_VALUE means no bound yet
@@ -273,54 +309,67 @@ public class OrderGraphEnumerator {
         long prevCacheTime      = this.cache.hashingTime;
         long prevEvictionTime   = this.cache.cacheEvictionTime;
         long prevPqEvictionTime = this.pqPruningTime;
+        long prevGetTime        = this.cache.getTime;
+        long prevPutTime        = this.cache.putTime;
+        long prevContainsTime   = this.cache.containsTime;
 
         while (topK.size() < k && !pq.isEmpty()) {
             // pop best solution
             node = pq.poll();
             iteration++;
 
-            if (node.path.size() == this.problem.numRows) {
-                // found a leaf node
+            if (node.length == this.problem.numRows) {
+                // found a leaf node — reconstruct solution by walking parent chain
                 topK.add(node.solution());
                 continue;
             }
 
-            // get set of used columns
-            BitSet cols = pathToBitSet(node.path);
+            // usedCols is already stored on the node; no recomputation needed
+            BitSet cols = node.usedCols;
 
             // generate children: try assigning the next row
             for (int col = 0; col < this.problem.numCols; col++) {
                 // skip if column is already used
                 if (cols.get(col)) continue;
 
-                // update path to node
-                List<Integer> newPath = new ArrayList<>(node.path);
-                newPath.add(col);
-
-                // Bug fix 3: prune on partial path cost *before* cache lookup or Hungarian.
-                // pathCost can only increase as more rows are assigned, so if it already
-                // exceeds the bound there is no point evaluating the sub-problem.
-                int pathCost = this.problem.cost(newPath);
+                // Prune on partial path cost before cache lookup or Hungarian.
+                // pathCost can only increase as more rows are assigned.
+                int pathCost = this.costAt(node, col);
                 if (this.config.pqReductionEnabled && pathCost > pqLowerBound)
                     continue;
 
-                BitSet newCols = (BitSet) cols.clone();
-                newCols.set(col);
-
-                // Bug fix 1: single lookup via getIfPresent() instead of contains() + get(),
-                // which previously called makeKey() twice on every cache hit.
-                Integer cached = this.cache.getIfPresent(newCols);
+                // Temporarily mutate cols in-place for the cache lookup, avoiding
+                // a clone on every candidate. We clear the bit immediately after,
+                // whether the child is pruned or survives to the PQ.
+                cols.set(col);
+                Integer cached = this.cache.getIfPresent(cols);
                 int solCost;
                 if (cached != null) {
                     solCost = cached;
                 } else {
+                    // Need a stable key for storage — clone only on a cache miss.
+                    // The cloned BitSet is handed off to the new node below, so
+                    // it is not cloned again.
+                    BitSet newCols = (BitSet) cols.clone();
+                    cols.clear(col); // restore parent's BitSet before any early exit
                     int[][] newMatrix = subMatrix(newCols);
                     solCost = callHungarian(newMatrix).cost;
                     this.cache.put(newCols, solCost);
+
+                    // log cache hit for this child (ALL mode only)
+                    logger.logCacheHit(iteration, node.length + 1, col, this.cache.hits);
+
+                    int newCost = pathCost + solCost;
+                    if (this.config.pqReductionEnabled && newCost > pqLowerBound)
+                        continue;
+
+                    pq.add(new OrderGraphNode(newCost, col, node, newCols));
+                    continue;
                 }
+                cols.clear(col); // restore parent's BitSet after cache hit
 
                 // log cache hit for this child (ALL mode only)
-                logger.logCacheHit(iteration, newPath.size(), col, this.cache.hits);
+                logger.logCacheHit(iteration, node.length + 1, col, this.cache.hits);
 
                 int newCost = pathCost + solCost;
 
@@ -328,23 +377,41 @@ public class OrderGraphEnumerator {
                 if (this.config.pqReductionEnabled && newCost > pqLowerBound)
                     continue;
 
-                // push child onto pq
-                OrderGraphNode newNode = new OrderGraphNode(newCost, newPath);
-                pq.add(newNode);
+                // Cache hit path: clone only now that we know the child survives.
+                BitSet newCols = (BitSet) cols.clone();
+                newCols.set(col);
+                pq.add(new OrderGraphNode(newCost, col, node, newCols));
             }
 
             // --- PQ size reduction ---
-            // If pq has grown beyond 2k, find the kth-cheapest cost as the new
-            // lower bound and discard everything above it.
+            // Use quickselect to partition the PQ contents around the k-th cheapest
+            // node in O(n) average time, then re-heapify only the k survivors.
+            //
+            // Complexity: O(n) quickselect + O(k) heapify = O(n) average overall.
+            // The previous max-heap approach was O(n log k); full sort was O(n log n).
             if (this.config.pqReductionEnabled && pq.size() > 2 * k) {
-                List<OrderGraphNode> nodes = new ArrayList<>(pq);
                 long pqt0 = System.nanoTime();
-                nodes.sort((a, b) -> b.cost - a.cost);
-                int newBound = nodes.get(k - 1).cost;
+
+                // Drain PQ into a flat array for in-place partitioning.
+                // toArray avoids an extra copy vs. new ArrayList<>(pq).
+                @SuppressWarnings("unchecked")
+                OrderGraphNode[] arr = pq.toArray(new OrderGraphNode[0]);
+
+                // Partition so arr[0..k-1] are the k cheapest (unsorted),
+                // arr[k] is the k-th cheapest, and arr[k+1..] are more expensive.
+                quickselect(arr, 0, arr.length - 1, k - 1);
+
+                // arr[k-1] is now the k-th cheapest — its cost is the new bound.
+                int newBound = arr[k - 1].cost;
                 if (newBound < pqLowerBound)
                     pqLowerBound = newBound;
+
+                // Re-heapify the k survivors. addAll() on a just-cleared
+                // PriorityQueue bulk-loads via sift-down in O(k).
                 pq.clear();
-                pq.addAll(nodes.subList(k, nodes.size()));
+                for (int i = 0; i < k; i++)
+                    pq.add(arr[i]);
+
                 this.pqPruningTime += System.nanoTime() - pqt0;
             }
 
@@ -357,15 +424,25 @@ public class OrderGraphEnumerator {
             long curCache      = this.cache.hashingTime;
             long curEviction   = this.cache.cacheEvictionTime;
             long curPqEviction = this.pqPruningTime;
+            long curGetTime    = this.cache.getTime;
+            long curPutTime    = this.cache.putTime;
+            long curContains   = this.cache.containsTime;
             logger.logTimings(iteration,
                 curHungarian  - prevHungarianTime,
                 curCache      - prevCacheTime,
                 curEviction   - prevEvictionTime,
                 curPqEviction - prevPqEvictionTime);
+            logger.logCacheOpTimes(iteration,
+                curGetTime  - prevGetTime,
+                curPutTime  - prevPutTime,
+                curContains - prevContainsTime);
             prevHungarianTime  = curHungarian;
             prevCacheTime      = curCache;
             prevEvictionTime   = curEviction;
             prevPqEvictionTime = curPqEviction;
+            prevGetTime        = curGetTime;
+            prevPutTime        = curPutTime;
+            prevContainsTime   = curContains;
         }
 
         logger.close();
@@ -386,6 +463,72 @@ public class OrderGraphEnumerator {
         return solution;
     }
 
+    /**
+     * Computes the partial path cost for the child node that would be created
+     * by assigning {@code col} to the next row after {@code parent}.
+     *
+     * Walks the parent-pointer chain to sum costMatrix[row][assignedCol] for
+     * each row already in the path, then adds costMatrix[parent.length][col]
+     * for the new assignment. This replaces the old cost(List) call and avoids
+     * iterating a copied ArrayList.
+     *
+     * O(depth) — same asymptotic cost as before, but with no allocation.
+     */
+    int costAt(OrderGraphNode parent, int col) {
+        int total = this.problem.costMatrix[parent.length][col];
+        OrderGraphNode cur = parent;
+        int row = parent.length - 1;
+        while (cur.parent != null) {
+            total += this.problem.costMatrix[row][cur.col];
+            cur = cur.parent;
+            row--;
+        }
+        return total;
+    }
+
+    /**
+     * Quickselect: rearranges arr[lo..hi] so that arr[0..k] contains the
+     * (k+1) cheapest nodes (by cost ascending) and arr[k] is exactly the
+     * (k+1)-th cheapest. Elements within each partition are in no particular order.
+     *
+     * Average O(n), worst-case O(n²) — median-of-three pivot selection keeps
+     * the worst case rare in practice without needing a random number generator.
+     */
+    private static void quickselect(OrderGraphNode[] arr, int lo, int hi, int k) {
+        while (lo < hi) {
+            // Median-of-three pivot: compare lo, mid, hi and put the median at hi
+            int mid = lo + (hi - lo) / 2;
+            if (arr[lo].cost > arr[mid].cost) swap(arr, lo, mid);
+            if (arr[lo].cost > arr[hi].cost)  swap(arr, lo, hi);
+            if (arr[mid].cost > arr[hi].cost) swap(arr, mid, hi);
+            // arr[mid] is now the median; move it to hi-1 as the pivot
+            swap(arr, mid, hi);
+            int pivot = partition(arr, lo, hi);
+            if      (pivot == k) return;
+            else if (pivot  < k) lo = pivot + 1;
+            else                 hi = pivot - 1;
+        }
+    }
+
+    /** Lomuto partition around arr[hi]; returns final pivot index. */
+    private static int partition(OrderGraphNode[] arr, int lo, int hi) {
+        int pivotCost = arr[hi].cost;
+        int i = lo;
+        for (int j = lo; j < hi; j++) {
+            if (arr[j].cost <= pivotCost)
+                swap(arr, i++, j);
+        }
+        swap(arr, i, hi);
+        return i;
+    }
+
+    private static void swap(OrderGraphNode[] arr, int i, int j) {
+        OrderGraphNode tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+    }
+
+    /** @deprecated No longer called from the hot path; kept for potential external use. */
     static BitSet pathToBitSet(List<Integer> path) {
         BitSet bs = new BitSet();
         for (int i : path)
@@ -507,15 +650,15 @@ public class OrderGraphEnumerator {
             {7,8,8,7,0,8,6,8,9,8,3,6,1,7,4,9,2,0,8,2},
             {7,8,4,4,1,7,6,9,4,1,5,9,7,1,3,5,7,3,6,6},
             {7,9,1,9,6,0,3,8,4,1,4,5,0,3,1,4,4,4,0,0}};
-        int k = 100000;
+        int k = 500000;
 
         AssignmentProblem problem = new AssignmentProblem(costMatrix);
 
         EnumeratorConfig config = new EnumeratorConfig(
             true,              // pqReductionEnabled
-            true,              // cacheEvictionEnabled
-            true,              // customHashingEnabled
-            LoggingMode.ALL    // loggingMode: NONE, PQ_CACHE_SIZE, or ALL
+            false,              // cacheEvictionEnabled
+            false,              // customHashingEnabled
+            LoggingMode.NONE  // loggingMode: NONE, PQ_CACHE_SIZE, or ALL
         );
 
         OrderGraphEnumerator ogEnumerator = new OrderGraphEnumerator(problem, config);
@@ -561,276 +704,8 @@ public class OrderGraphEnumerator {
 }
 
 
-/**
- * Used by Order Graph Enumerator.
- */
-class OrderGraphNode implements Comparable<OrderGraphNode> {
-    int cost;
-    List<Integer> path;
-    int length;
-    int id;
-    static int id_counter = 0;
-
-    public OrderGraphNode(int cost, List<Integer> path) {
-        this.cost   = cost;
-        this.path   = path;
-        this.length = path.size();
-        this.id = OrderGraphNode.id_counter++;
-    }
-
-    /**
-     * Order by cost ascending, then by depth descending (deeper = more progress),
-     * then lexicographically for determinism.
-     */
-    public int compareTo(OrderGraphNode other) {
-        if (this.cost < other.cost)       return -1;
-        else if (this.cost > other.cost)  return  1;
-        else {
-            if (this.length > other.length)       return -1;
-            else if (this.length < other.length)  return  1;
-            else {
-                /*
-                for (int i = 0; i < this.length; i++)
-                    if (this.path.get(i) < other.path.get(i))       return -1;
-                    else if (this.path.get(i) > other.path.get(i))  return  1;
-                return 0;
-                 */
-                if (this.id > other.id)         return 1;
-                else if (this.id < other.id)    return -1;
-                return 0;
-            }
-        }
-    }
-
-    public AssignmentSolution solution() {
-        int[] arr = new int[this.path.size()];
-        for (int i = 0; i < this.path.size(); i++)
-            arr[i] = this.path.get(i);
-        return new AssignmentSolution(arr, this.cost);
-    }
-}
 
 
-/**
- * Wrapper around BitSet that replaces Java's default hash with a
- * Zobrist hash for better bucket distribution at similar cardinalities.
- *
- * equals() still delegates to BitSet.equals() for correctness.
- */
-class ZobristKey {
-    final BitSet bits;
-    private final int hashCode;
-
-    ZobristKey(BitSet bits, long[] zobristTable) {
-        this.bits = bits;
-        long h = 0L;
-        for (int i = bits.nextSetBit(0); i >= 0; i = bits.nextSetBit(i + 1))
-            h ^= zobristTable[i];
-        // fold 64-bit Zobrist value into 32-bit int using Murmur3 finalizer
-        h ^= (h >>> 33);
-        h *= 0xff51afd7ed558ccdL;
-        h ^= (h >>> 33);
-        h *= 0xc4ceb9fe1a85ec53L;
-        h ^= (h >>> 33);
-        this.hashCode = (int) h;
-    }
-
-    @Override
-    public int hashCode() {
-        return this.hashCode;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof ZobristKey)) return false;
-        return this.bits.equals(((ZobristKey) o).bits);
-    }
-}
 
 
-/**
- * Cache for sub-problem costs used by OrderGraphEnumerator.
- *
- * Supports optional Zobrist hashing and LFU-based cache eviction.
- */
-class OrderGraphCache {
-    // flat cache: ZobristKey -> cost
-    HashMap<ZobristKey, Integer> cache;
 
-    // LFU frequency map (only populated when cacheEvictionEnabled)
-    HashMap<ZobristKey, Integer> freq;
-
-    // Zobrist random table, one long per column index
-    long[] zobristTable;
-
-    // maximum global cache size: C(n, n/2)
-    int maxSize;
-
-    // stats
-    int hits;
-    int misses;
-    int evictions;
-
-    // timing (nanoseconds)
-    long hashingTime;
-    long cacheEvictionTime;
-
-    boolean customHashingEnabled;
-    boolean cacheEvictionEnabled;
-
-    public OrderGraphCache(int numRows, int numCols, EnumeratorConfig config) {
-        this.customHashingEnabled = config.customHashingEnabled;
-        this.cacheEvictionEnabled = config.cacheEvictionEnabled;
-
-        // build Zobrist table regardless; cost is negligible and simplifies the code
-        this.zobristTable = buildZobristTable(numCols);
-
-        this.cache = new HashMap<>();
-        this.freq  = new HashMap<>();
-
-        // C(n, n/2) as the global cap
-        this.maxSize = binomial(numCols, numCols / 2);
-
-        this.hits      = 0;
-        this.misses    = 0;
-        this.evictions = 0;
-
-        this.hashingTime       = 0;
-        this.cacheEvictionTime = 0;
-
-        // prime cache with the fully-assigned (trivial) sub-problem: cost = 0
-        BitSet trivialSet = allCols(numCols);
-        ZobristKey trivialKey = makeKey(trivialSet);
-        this.cache.put(trivialKey, 0);
-        if (this.cacheEvictionEnabled)
-            this.freq.put(trivialKey, 1);
-    }
-
-    /** Build a table of random longs, one per column. */
-    static long[] buildZobristTable(int numCols) {
-        long[] table = new long[numCols];
-        Random rng = new Random(0xdeadbeefL); // fixed seed for reproducibility
-        for (int i = 0; i < numCols; i++)
-            table[i] = rng.nextLong();
-        return table;
-    }
-
-    /**
-     * Compute C(n, k) as an int. Returns Integer.MAX_VALUE on overflow
-     * so the cap is effectively disabled for very large problems.
-     */
-    static int binomial(int n, int k) {
-        if (k < 0 || k > n) return 0;
-        if (k == 0 || k == n) return 1;
-        k = Math.min(k, n - k);
-        long result = 1;
-        for (int i = 0; i < k; i++) {
-            result = result * (n - i) / (i + 1);
-            if (result > Integer.MAX_VALUE) return Integer.MAX_VALUE;
-        }
-        return (int) result;
-    }
-
-    static BitSet allCols(int numCols) {
-        BitSet all = new BitSet(numCols);
-        all.set(0, numCols);
-        return all;
-    }
-
-    /**
-     * Wrap a BitSet in a ZobristKey.
-     * When customHashingEnabled is false the ZobristKey is still used as the
-     * map key, but its hashCode falls back to the BitSet's own hash so the
-     * behaviour matches the original code.
-     */
-    ZobristKey makeKey(BitSet bits) {
-        if (this.customHashingEnabled)
-            return new ZobristKey(bits, this.zobristTable);
-        // fallback: wrap without Zobrist so hashCode delegates to BitSet
-        return new ZobristKey(bits, this.zobristTable) {
-            @Override public int hashCode() { return bits.hashCode(); }
-        };
-    }
-
-    /**
-     * Returns the cached cost for the given key, or null if not present.
-     * Combines the old contains() + get() into a single map lookup,
-     * eliminating the double makeKey() call on every cache hit.
-     */
-    public Integer getIfPresent(BitSet key) {
-        long t0 = System.nanoTime();
-        ZobristKey zk = makeKey(key);
-        this.hashingTime += System.nanoTime() - t0;
-        Integer val = this.cache.get(zk);
-        if (val != null) {
-            this.hits++;
-            if (this.cacheEvictionEnabled)
-                this.freq.merge(zk, 1, Integer::sum);
-        } else {
-            this.misses++;
-        }
-        return val;
-    }
-
-    /** @deprecated Use getIfPresent() to avoid double hashing on hits. */
-    public boolean contains(BitSet key) {
-        long t0 = System.nanoTime();
-        ZobristKey zk = makeKey(key);
-        this.hashingTime += System.nanoTime() - t0;
-        if (this.cache.containsKey(zk)) {
-            this.hits++;
-            if (this.cacheEvictionEnabled)
-                this.freq.merge(zk, 1, Integer::sum);
-            return true;
-        } else {
-            this.misses++;
-            return false;
-        }
-    }
-
-    public int get(BitSet key) {
-        long t0 = System.nanoTime();
-        ZobristKey zk = makeKey(key);
-        this.hashingTime += System.nanoTime() - t0;
-        return this.cache.get(zk);
-    }
-
-    public void put(BitSet key, int value) {
-        long t0 = System.nanoTime();
-        ZobristKey zk = makeKey(key);
-        this.hashingTime += System.nanoTime() - t0;
-        this.cache.put(zk, value);
-        if (this.cacheEvictionEnabled) {
-            this.freq.put(zk, 1);
-            long t1 = System.nanoTime();
-            maybeEvict();
-            this.cacheEvictionTime += System.nanoTime() - t1;
-        }
-    }
-
-    public int size() {
-        return this.cache.size();
-    }
-
-    /**
-     * If the cache exceeds maxSize, evict the bottom 10% of entries by
-     * frequency (least frequently used).
-     */
-    void maybeEvict() {
-        if (this.cache.size() <= this.maxSize) return;
-
-        // collect and sort all entries by frequency ascending
-        List<java.util.Map.Entry<ZobristKey, Integer>> entries =
-            new ArrayList<>(this.freq.entrySet());
-        entries.sort(java.util.Map.Entry.comparingByValue());
-
-        int toEvict = Math.max(1, this.cache.size() / 10);
-        for (int i = 0; i < toEvict && i < entries.size(); i++) {
-            ZobristKey victim = entries.get(i).getKey();
-            this.cache.remove(victim);
-            this.freq.remove(victim);
-            this.evictions++;
-        }
-    }
-}

@@ -1,39 +1,39 @@
-import jdk.jfr.consumer.*;
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
+import jdk.jfr.consumer.*;
 
-/**
- * Reads all .jfr files in JFR/ and writes:
- *   jfr_algorithms.csv   - one row per AlgorithmEvent (duration, n, k, algorithm)
- *   jfr_cpu.csv          - one row per CPULoad sample
- *   jfr_stacks.csv       - per-method sample counts, tagged to algorithm/n/k
- *
- * Usage:
- *   javac JfrExtract.java
- *   java  JfrExtract
- */
 public class JfrExtract {
 
-    /** Time window for one AlgorithmEvent run. */
     static class AlgoWindow {
         final String algorithm;
         final int    n, k;
         final long   startMs, endMs;
+        final int    numBuckets;
 
-        AlgoWindow(String algorithm, int n, int k, long startMs, long endMs) {
-            this.algorithm = algorithm;
+        AlgoWindow(String algorithm, int n, int k, long startMs, long endMs, int numBuckets) {
+            this.algorithm  = algorithm;
             this.n = n; this.k = k;
-            this.startMs = startMs;
-            this.endMs   = endMs;
+            this.startMs    = startMs;
+            this.endMs      = endMs;
+            this.numBuckets = numBuckets;
         }
 
         boolean contains(long tsMs) {
             return tsMs >= startMs && tsMs <= endMs;
         }
+
+        int bucket(long tsMs) {
+            long duration = endMs - startMs;
+            if (duration <= 0) return 0;
+            int b = (int)((tsMs - startMs) * numBuckets / duration);
+            return Math.min(b, numBuckets - 1);
+        }
     }
 
     public static void main(String[] args) throws Exception {
+
+        int NUM_BUCKETS = 10;
 
         Path jfrDir = Paths.get("JFR");
         if (!Files.isDirectory(jfrDir)) {
@@ -61,7 +61,7 @@ public class JfrExtract {
 
             algCsv.println("file,algorithm,n,k,duration_ms");
             cpuCsv.println("file,timestamp_ms,machineTotal,jvmUser,jvmSystem");
-            stackCsv.println("file,algorithm,n,k,class,method,sample_count,pct_of_algo");
+            stackCsv.println("file,algorithm,n,k,bucket_index,bucket_start_ms,class,method,sample_count,pct_of_bucket");
 
             for (Path jfrFile : jfrFiles) {
                 String fname = jfrFile.getFileName().toString();
@@ -82,7 +82,7 @@ public class JfrExtract {
                             int    n     = safeInt(event, "n");
                             int    k     = safeInt(event, "k");
 
-                            windows.add(new AlgoWindow(algo, n, k, startMs, endMs));
+                            windows.add(new AlgoWindow(algo, n, k, startMs, endMs, NUM_BUCKETS));
                             algCsv.printf("%s,%s,%d,%d,%.3f%n",
                                 fname, algo, n, k, (double)(endMs - startMs));
                         }
@@ -96,11 +96,14 @@ public class JfrExtract {
                         "make sure you're using the updated BenchmarkJFR.java with custom events.");
                 }
 
-                // ── Pass 2: tag ExecutionSamples to windows ──────────────────
-                // window -> (class.method -> hit count)
-                Map<AlgoWindow, Map<String, Integer>> windowCounts = new LinkedHashMap<>();
-                for (AlgoWindow w : windows)
-                    windowCounts.put(w, new LinkedHashMap<>());
+                // ── Pass 2: tag ExecutionSamples to windows + buckets ────────
+                Map<AlgoWindow, Map<Integer, Map<String, Integer>>> windowBucketCounts = new LinkedHashMap<>();
+                for (AlgoWindow w : windows) {
+                    Map<Integer, Map<String, Integer>> buckets = new LinkedHashMap<>();
+                    for (int i = 0; i < NUM_BUCKETS; i++)
+                        buckets.put(i, new LinkedHashMap<>());
+                    windowBucketCounts.put(w, buckets);
+                }
 
                 int totalSamples = 0, taggedSamples = 0;
 
@@ -109,7 +112,6 @@ public class JfrExtract {
                         RecordedEvent event = rf.readEvent();
                         String type = event.getEventType().getName();
 
-                        // CPU Load
                         if (type.equals("jdk.CPULoad")) {
                             cpuCsv.printf("%s,%d,%.4f,%.4f,%.4f%n",
                                 fname,
@@ -120,7 +122,6 @@ public class JfrExtract {
                             continue;
                         }
 
-                        // ExecutionSample
                         if (!type.equals("jdk.ExecutionSample")) continue;
                         totalSamples++;
 
@@ -134,49 +135,59 @@ public class JfrExtract {
                         taggedSamples++;
 
                         RecordedStackTrace stack = event.getStackTrace();
-                        if (stack == null) continue;
+                        if (stack == null || stack.getFrames().isEmpty()) continue;
 
-                        Map<String, Integer> counts = windowCounts.get(matched);
+                        RecordedFrame topFrame = stack.getFrames().get(0);
+                        RecordedMethod m = topFrame.getMethod();
+                        if (m == null || m.getType() == null) continue;
 
-                        for (RecordedFrame frame : stack.getFrames()) {
-                            RecordedMethod m = frame.getMethod();
-                            if (m == null) continue;
-                            String key = m.getType().getName() + "\t" + m.getName();
-                            counts.merge(key, 1, Integer::sum);
-                        }
+                        String key = m.getType().getName() + "\t" + m.getName();
+                        int bucket = matched.bucket(tsMs);
+
+                        windowBucketCounts.get(matched).get(bucket).merge(key, 1, Integer::sum);
                     }
                 }
 
                 System.out.printf("    ExecutionSamples: %d total, %d tagged%n",
                     totalSamples, taggedSamples);
 
-                // ── Write stack rows with percentages ────────────────────────
+                // ── Write bucketed stack rows ────────────────────────────────
                 for (AlgoWindow w : windows) {
-                    Map<String, Integer> counts = windowCounts.get(w);
-                    int total = counts.values().stream().mapToInt(Integer::intValue).sum();
-                    if (total == 0) {
-                        System.out.printf("    WARNING: 0 samples tagged for %s n=%d k=%d%n",
-                            w.algorithm, w.n, w.k);
-                        continue;
-                    }
+                    Map<Integer, Map<String, Integer>> buckets = windowBucketCounts.get(w);
+                    long bucketDurationMs = (w.endMs - w.startMs) / NUM_BUCKETS;
 
-                    counts.entrySet().stream()
-                        .sorted((a, b) -> b.getValue() - a.getValue())
-                        .forEach(entry -> {
-                            String[] parts = entry.getKey().split("\t", 2);
-                            double pct = 100.0 * entry.getValue() / total;
-                            stackCsv.printf("%s,%s,%d,%d,%s,%s,%d,%.2f%n",
-                                fname, w.algorithm, w.n, w.k,
-                                parts[0], parts[1],
-                                entry.getValue(), pct);
-                        });
+                    for (int i = 0; i < NUM_BUCKETS; i++) {
+                        Map<String, Integer> counts = buckets.get(i);
+                        int total = counts.values().stream().mapToInt(Integer::intValue).sum();
+
+                        final int    bucketIdx   = i;
+                        final long   bucketStart = w.startMs + (i * bucketDurationMs);
+
+                        if (total == 0) {
+                            System.out.printf("    WARNING: 0 samples in bucket %d for %s n=%d k=%d%n",
+                                bucketIdx, w.algorithm, w.n, w.k);
+                            continue;
+                        }
+
+                        counts.entrySet().stream()
+                            .sorted((a, b) -> b.getValue() - a.getValue())
+                            .forEach(entry -> {
+                                String[] parts = entry.getKey().split("\t", 2);
+                                double pct = 100.0 * entry.getValue() / total;
+                                stackCsv.printf("%s,%s,%d,%d,%d,%d,%s,%s,%d,%.2f%n",
+                                    fname, w.algorithm, w.n, w.k,
+                                    bucketIdx, bucketStart,
+                                    parts[0], parts[1],
+                                    entry.getValue(), pct);
+                            });
+                    }
                 }
             }
         }
 
         System.out.println("Written: jfr_algorithms.csv");
         System.out.println("Written: jfr_cpu.csv");
-        System.out.println("Written: jfr_stacks.csv  ← method hotspot percentages here");
+        System.out.println("Written: jfr_stacks.csv");
     }
 
     static String safeString(RecordedEvent e, String f) {

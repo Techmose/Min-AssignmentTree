@@ -15,7 +15,7 @@ class AlgorithmEvent extends Event {
 
 public class BenchmarkJFR {
 
-    static final int   MAX_N       = 32;
+    static final int   MAX_N       = 40;
     static final int[] N_VALUES    = buildNValues(MAX_N);
     static final int[] K_VALUES    = { 100000, 500000 };
     static final long  SEED        = 42L;
@@ -23,7 +23,7 @@ public class BenchmarkJFR {
 
     static int[] buildNValues(int maxN) {
         java.util.List<Integer> vals = new java.util.ArrayList<>();
-        for (int n = 2; n <= maxN; n += 10)
+        for (int n = 40; n <= maxN; n += 2)
             vals.add(n);
         return vals.stream().mapToInt(Integer::intValue).toArray();
     }
