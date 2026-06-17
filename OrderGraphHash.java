@@ -7,7 +7,7 @@
  * equals() still delegates to BitSet.equals() for correctness.
  */
 import java.util.BitSet;
-class OrderGraphHash {
+public class OrderGraphHash {
     final BitSet bits;
     private final int hashCode;
     private final int cost;

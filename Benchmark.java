@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
+
 /**
  * Benchmark runner for OrderGraphEnumerator vs MurtyEnumerator.
  *
@@ -26,7 +27,7 @@ public class Benchmark {
     // =========================================================================
     // CONFIGURE: matrix sizes to benchmark
     // =========================================================================
-    static final int MAX_N = 40;
+    static final int MAX_N = 35;
 
     static final int[] N_VALUES = buildNValues(MAX_N);
 
@@ -81,12 +82,12 @@ public class Benchmark {
                     System.out.printf("  k=%-8d%n", k);
 
                     // OG_FFFF — all optimizations off (baseline)
-                    BenchmarkResult r1 = runOrderGraph(problem, n, k,
-                        new EnumeratorConfig(false, false, false, LoggingMode.NONE),
-                        "OG_FFFF");
-                    writeCsvRow(csv, r1);
-                    allResults.add(r1);
-                    System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
+                    // BenchmarkResult r1 = runOrderGraph(problem, n, k,
+                    //     new EnumeratorConfig(false, false, false, LoggingMode.NONE),
+                    //     "OG_FFFF");
+                    // writeCsvRow(csv, r1);
+                    // allResults.add(r1);
+                    // System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
 
                     // OG_TFFF — cache eviction on, everything else off
                     BenchmarkResult r2 = runOrderGraph(problem, n, k,
@@ -95,6 +96,11 @@ public class Benchmark {
                     writeCsvRow(csv, r2);
                     allResults.add(r2);
                     System.out.printf("    %-10s  %.4fs%n", r2.config, r2.timeNs * 1e-9);
+                    
+                    BenchmarkResult r4 = runOther(problem, n, k);
+                    writeCsvRow(csv, r4);
+                    allResults.add(r4);
+                    System.out.printf("    %-10s  %.4fs%n", r4.config, r4.timeNs * 1e-9);
 
                     // Murty
                     BenchmarkResult r3 = runMurty(problem, n, k);
@@ -103,8 +109,9 @@ public class Benchmark {
                     System.out.printf("    %-10s  %.4fs%n", r3.config, r3.timeNs * 1e-9);
 
                     System.out.println();
-                    sanityCheck(r3, r1);
+                    //sanityCheck(r3, r1);
                     sanityCheck(r3, r2);
+                    sanityCheck(r3, r4);
                 }
                 System.out.println();
             }
@@ -141,6 +148,27 @@ public class Benchmark {
         System.gc();
         return new BenchmarkResult(n, k, SEED, "MURTY", elapsed, solution);
     }
+
+    static BenchmarkResult runSplit(AssignmentProblem problem, int n, int k){
+        OrderGraphEnumeratorSplit split = new OrderGraphEnumeratorSplit(problem);
+        long t0 = System.nanoTime();
+        List<AssignmentSolution> solution = split.enumerate(k);
+        long elapsed = System.nanoTime() - t0;
+        split = null;
+        System.gc();
+        return new BenchmarkResult(n, k, SEED,"Other", elapsed, solution);
+    }
+
+    static BenchmarkResult runOther(AssignmentProblem problem, int n, int k){
+        OrderGraphEnumeratorOG other = new OrderGraphEnumeratorOG(problem);
+        long t0 = System.nanoTime();
+        List<AssignmentSolution> solution = other.enumerate(k);
+        long elapsed = System.nanoTime() - t0;
+        other = null;
+        System.gc();
+        return new BenchmarkResult(n, k, SEED,"Other", elapsed, solution);
+    }
+
 
     // -------------------------------------------------------------------------
     // Helpers

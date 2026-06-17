@@ -1,3 +1,4 @@
+
 import java.io.IOException;
 import java.nio.file.Paths;
 import java.time.Duration;
@@ -15,15 +16,15 @@ class AlgorithmEvent extends Event {
 
 public class BenchmarkJFR {
 
-    static final int   MAX_N       = 40;
+    static final int   MAX_N       = 30;
     static final int[] N_VALUES    = buildNValues(MAX_N);
-    static final int[] K_VALUES    = { 100000, 500000 };
+    static final int[] K_VALUES    = { 10000, 100000 };
     static final long  SEED        = 42L;
     static final int   COST_RANGE  = 999999; // restore realistic range
 
     static int[] buildNValues(int maxN) {
         java.util.List<Integer> vals = new java.util.ArrayList<>();
-        for (int n = 40; n <= maxN; n += 2)
+        for (int n = 30; n <= maxN; n += 2)
             vals.add(n);
         return vals.stream().mapToInt(Integer::intValue).toArray();
     }
@@ -48,12 +49,14 @@ public class BenchmarkJFR {
             for (int k : K_VALUES) {
                 System.out.printf("  k=%d%n", k);
 
-                runOrderGraph(problem, n, k,
-                    new EnumeratorConfig(false, false, false, LoggingMode.NONE), "OG_FFFF");
+                // runOrderGraph(problem, n, k,
+                //     new EnumeratorConfig(false, false, false, LoggingMode.NONE), "OG_FFFF");
 
-                runOrderGraph(problem, n, k,
-                    new EnumeratorConfig(true, false, false, LoggingMode.NONE), "OG_TFFF");
-
+                //runOrderGraph(problem, n, k,
+                //    new EnumeratorConfig(true, false, false, LoggingMode.NONE), "OG_TFFF");
+                
+                runOther(problem, n, k);
+                //runSplit(problem, n, k);
                 runMurty(problem, n, k);
             }
         }
@@ -63,20 +66,20 @@ public class BenchmarkJFR {
         rec.close();
     }
 
-    static void runOrderGraph(AssignmentProblem problem, int n, int k,
-                              EnumeratorConfig config, String label) {
-        AlgorithmEvent e = new AlgorithmEvent();
-        e.algorithm = label;
-        e.n = n;
-        e.k = k;
-        e.begin();
+    // static void runOrderGraph(AssignmentProblem problem, int n, int k,
+    //                           EnumeratorConfig config, String label) {
+    //     AlgorithmEvent e = new AlgorithmEvent();
+    //     e.algorithm = label;
+    //     e.n = n;
+    //     e.k = k;
+    //     e.begin();
 
-        OrderGraphEnumerator og = new OrderGraphEnumerator(problem, config);
-        og.enumerate(k);
-        og = null;
+    //     OrderGraphEnumerator og = new OrderGraphEnumerator(problem, config);
+    //     og.enumerate(k);
+    //     og = null;
 
-        e.commit(); // marks end on timeline
-    }
+    //     e.commit(); // marks end on timeline
+    // }
 
     static void runMurty(AssignmentProblem problem, int n, int k) {
         AlgorithmEvent e = new AlgorithmEvent();
@@ -91,6 +94,34 @@ public class BenchmarkJFR {
 
         e.commit();
     }
+
+    static void runOther(AssignmentProblem problem, int n, int k) {
+        AlgorithmEvent e = new AlgorithmEvent();
+        e.algorithm = "OTHER";
+        e.n = n;
+        e.k = k;
+        e.begin();
+
+        OrderGraphEnumeratorOG other = new OrderGraphEnumeratorOG(problem);
+        other.enumerate(k);
+        other = null;
+
+        e.commit();
+    }
+
+    // static void runSplit(AssignmentProblem problem, int n, int k) {
+    //     AlgorithmEvent e = new AlgorithmEvent();
+    //     e.algorithm = "SPLIT";
+    //     e.n = n;
+    //     e.k = k;
+    //     e.begin();
+
+    //     OrderGraphEnumeratorSplit split = new OrderGraphEnumeratorSplit(problem);
+    //     split.enumerate(k);
+    //     split = null;
+
+    //     e.commit();
+    // }
 
     static int[][] randomMatrix(int n, int costRange, long seed) {
         Random rng = new Random(seed);

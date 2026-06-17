@@ -14,10 +14,10 @@ public class EnumeratorRunner {
     // ----------------------------------------------------------------
     // Problem matrix and k — edit these to change the benchmark target
     // ----------------------------------------------------------------
-    static final int    N       = 20;
+    static final int    N       = 40;
     static final int    COST_MAX   = 9999;   // costs are in [0, COST_MAX)
     static final long   SEED       = 0;  // set to 0 for a different matrix each run
-    static final int    K          = 1000000;
+    static final int    K          = 500000;
     // ----------------------------------------------------------------
  
     static int[][] randomCostMatrix(int n, int maxCost, long seed) {
@@ -37,13 +37,13 @@ public class EnumeratorRunner {
 
         // Each row: { pqReduction, cacheEviction, customHashing, logging }
         boolean[][] flags = {
-            { false, false, false, false },  // FFFF
-            { true,  false, false, false },  // TFFF
+            //{ false, false, false, false },  // FFFF
+            //{ true,  false, false, false },  // TFFF
             //{ false, false, true,  false },  // FFTF
             //{ true, false, true, false  },  // TFTF
             //{ false, true,  false, false },  // FTFF
             //{ true,  true,  true,  false },  // TTTF
-            { false, false, false, true  },  // FFFT
+            //{ false, false, false, true  },  // FFFT
             { true,  false,  false,  true  },  // TFFT
         };
 
