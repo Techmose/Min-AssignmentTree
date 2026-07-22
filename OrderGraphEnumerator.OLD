@@ -12,7 +12,6 @@ import java.util.PriorityQueue;
 import java.util.Random;
 
 
-
 /**
  * Controls which CSV files are written during enumeration.
  *
@@ -21,6 +20,51 @@ import java.util.Random;
  * ALL           - writes pqSize.csv, cacheSize.csv, and cacheHits.csv.
  *                 Note: cacheHits logging is expensive at large k.
  */
+enum LoggingMode { NONE, PQ_CACHE_SIZE, ALL }
+
+
+/**
+ * Configuration for optional optimizations in OrderGraphEnumerator.
+ */
+class EnumeratorConfig {
+    /** If true, prune the PQ when size exceeds 2k, persisting the cost lower bound. */
+    boolean pqReductionEnabled;
+
+    /** If true, evict the bottom 10% of cache entries by LFU when global size exceeds C(n, n/2). */
+    boolean cacheEvictionEnabled;
+
+    /** If true, use Zobrist hashing for cache keys instead of Java's default BitSet hash. */
+    boolean customHashingEnabled;
+
+    /** Controls which CSV log files are written during enumeration. */
+    LoggingMode loggingMode;
+
+    public EnumeratorConfig(boolean pqReductionEnabled,
+                            boolean cacheEvictionEnabled,
+                            boolean customHashingEnabled,
+                            LoggingMode loggingMode) {
+        this.pqReductionEnabled   = pqReductionEnabled;
+        this.cacheEvictionEnabled = cacheEvictionEnabled;
+        this.customHashingEnabled = customHashingEnabled;
+        this.loggingMode          = loggingMode;
+    }
+
+    /** Default config: all optimizations off, no logging. */
+    public static EnumeratorConfig defaults() {
+        return new EnumeratorConfig(false, false, false, LoggingMode.NONE);
+    }
+
+    /**
+     * Returns a three-character config tag for filenames.
+     * Each character is T or F for: pqReduction, cacheEviction, customHashing.
+     */
+    public String configTag() {
+        return (pqReductionEnabled   ? "T" : "F")
+             + (cacheEvictionEnabled ? "T" : "F")
+             + (customHashingEnabled ? "T" : "F");
+    }
+}
+
 
 /**
  * Handles CSV logging for OrderGraphEnumerator.
@@ -32,14 +76,168 @@ import java.util.Random;
  * Each enumerate() call opens fresh writers, overwriting any prior run
  * with the same dimensions, k, and config.
  */
+class EnumeratorLogger {
+    private final LoggingMode mode;
+    private final String      dir;
+    private final String      fileSuffix; // e.g. "_k100000_TTF.csv"
+
+    private PrintWriter cacheHitsWriter;
+    private PrintWriter pqSizeWriter;
+    private PrintWriter cacheSizeWriter;
+    private PrintWriter timingsWriter;
+    private PrintWriter cacheGetTimeWriter;
+    private PrintWriter cachePutTimeWriter;
+    private PrintWriter cacheContainsTimeWriter;
+
+    /**
+     * @param mode       Logging mode from config.
+     * @param numRows    Row count of the problem matrix.
+     * @param numCols    Column count of the problem matrix.
+     * @param k          Target-k passed to enumerate().
+     * @param configTag  Three-char tag from EnumeratorConfig.configTag().
+     */
+    public EnumeratorLogger(LoggingMode mode, int numRows, int numCols,
+                            int k, String configTag) {
+        this.mode       = mode;
+        this.dir        = numRows + "x" + numCols;
+        this.fileSuffix = "_k" + k + "_" + configTag + ".csv";
+    }
+
+    /**
+     * Opens all writers appropriate for the current logging mode.
+     * Creates the output directory if it does not exist.
+     */
+    public void open() {
+        if (this.mode == LoggingMode.NONE) return;
+        try {
+            new File(this.dir).mkdirs();
+
+            this.pqSizeWriter = openWriter("pqSize");
+            this.pqSizeWriter.println("k,size");
+
+            this.cacheSizeWriter = openWriter("cacheSize");
+            this.cacheSizeWriter.println("k,size");
+
+            this.timingsWriter = openWriter("timings");
+            this.timingsWriter.println("k,hungarian_time,cache_time,eviction_time,pq_eviction_time");
+
+            this.cacheGetTimeWriter = openWriter("cacheGetTime");
+            this.cacheGetTimeWriter.println("k,get_time_ns");
+
+            this.cachePutTimeWriter = openWriter("cachePutTime");
+            this.cachePutTimeWriter.println("k,put_time_ns");
+
+            this.cacheContainsTimeWriter = openWriter("cacheContainsTime");
+            this.cacheContainsTimeWriter.println("k,contains_time_ns");
+
+            if (this.mode == LoggingMode.ALL) {
+                this.cacheHitsWriter = openWriter("cacheHits");
+                this.cacheHitsWriter.println("k,depth,nodeLabel,hits");
+            }
+        } catch (IOException e) {
+            System.err.println("Logger failed to open files: " + e.getMessage());
+        }
+    }
+
+    /** Flushes and closes all open writers. */
+    public void close() {
+        closeWriter(this.pqSizeWriter);
+        closeWriter(this.cacheSizeWriter);
+        closeWriter(this.cacheHitsWriter);
+        closeWriter(this.timingsWriter);
+        closeWriter(this.cacheGetTimeWriter);
+        closeWriter(this.cachePutTimeWriter);
+        closeWriter(this.cacheContainsTimeWriter);
+        this.pqSizeWriter            = null;
+        this.cacheSizeWriter         = null;
+        this.cacheHitsWriter         = null;
+        this.timingsWriter           = null;
+        this.cacheGetTimeWriter      = null;
+        this.cachePutTimeWriter      = null;
+        this.cacheContainsTimeWriter = null;
+    }
+
+    /**
+     * Log one row to timings.csv. Called once per iteration.
+     * All time values are per-iteration deltas in nanoseconds.
+     *
+     * @param iteration       Current outer-loop iteration count.
+     * @param hungarianTime   Nanoseconds spent in Hungarian algorithm this iteration.
+     * @param cacheTime       Nanoseconds spent on hashing/cache lookups this iteration.
+     * @param evictionTime    Nanoseconds spent on cache eviction this iteration.
+     * @param pqEvictionTime  Nanoseconds spent on PQ pruning this iteration.
+     */
+    public void logTimings(int iteration, long hungarianTime, long cacheTime,
+                           long evictionTime, long pqEvictionTime) {
+        if (this.timingsWriter == null) return;
+        this.timingsWriter.printf("%d,%d,%d,%d,%d%n",
+            iteration, hungarianTime, cacheTime, evictionTime, pqEvictionTime);
+    }
+
+    /** Log one row to pqSize.csv. Called once per iteration after PQ operations. */
+    public void logPQSize(int iteration, int pqSize) {
+        if (this.pqSizeWriter == null) return;
+        this.pqSizeWriter.printf("%d,%d%n", iteration, pqSize);
+    }
+
+    /** Log one row to cacheSize.csv. Called once per iteration. */
+    public void logCacheSize(int iteration, int cacheSize) {
+        if (this.cacheSizeWriter == null) return;
+        this.cacheSizeWriter.printf("%d,%d%n", iteration, cacheSize);
+    }
+
+    /**
+     * Log one row to cacheHits.csv. Called per child node evaluated.
+     * Only active under LoggingMode.ALL.
+     *
+     * @param iteration  Current outer-loop iteration count.
+     * @param depth      Depth of the child node (path length after adding col).
+     * @param colIndex   Column index representing this child (nodeLabel).
+     * @param hits       Total cache hits so far at time of this lookup.
+     */
+    public void logCacheHit(int iteration, int depth, int colIndex, int hits) {
+        if (this.cacheHitsWriter == null) return;
+        this.cacheHitsWriter.printf("%d,%d,%d,%d%n", iteration, depth, colIndex, hits);
+    }
+
+    /**
+     * Log one row to each cache-operation timing CSV. Called once per iteration.
+     * Values are per-iteration deltas in nanoseconds, matching the pattern used
+     * by logTimings() so the CSVs can be joined on the k column.
+     *
+     * @param iteration    Current outer-loop iteration count.
+     * @param getTimeNs    Nanoseconds spent in HashMap.get() this iteration.
+     * @param putTimeNs    Nanoseconds spent in HashMap.put() this iteration.
+     * @param containsNs   Nanoseconds spent in HashMap.containsKey() this iteration.
+     */
+    public void logCacheOpTimes(int iteration, long getTimeNs, long putTimeNs, long containsNs) {
+        if (this.cacheGetTimeWriter != null)
+            this.cacheGetTimeWriter.printf("%d,%d%n", iteration, getTimeNs);
+        if (this.cachePutTimeWriter != null)
+            this.cachePutTimeWriter.printf("%d,%d%n", iteration, putTimeNs);
+        if (this.cacheContainsTimeWriter != null)
+            this.cacheContainsTimeWriter.printf("%d,%d%n", iteration, containsNs);
+    }
+
+    private PrintWriter openWriter(String name) throws IOException {
+        String path = this.dir + File.separator + name + this.fileSuffix;
+        return new PrintWriter(new BufferedWriter(new FileWriter(path, false)));
+    }
+
+    private void closeWriter(PrintWriter w) {
+        if (w != null) { w.flush(); w.close(); }
+    }
+}
+
+
 /**
  * Algorithm for enumerating the top-k best solutions to the
  * assignment problem.  This algorithm is based on searching the Order
  * Graph.
  */
-public class OrderGraphEnumeratorSplit {
+public class OrderGraphEnumerator {
     AssignmentProblem problem;
-    OrderGraphCacheSplit cache;
+    OrderGraphCache cache;
     EnumeratorConfig config;
 
     // stats for algorithm performance
@@ -51,16 +249,16 @@ public class OrderGraphEnumeratorSplit {
      * Constructor for OrderGraphEnumerator with default config (all optimizations off).
      * @param problem The assignment problem to enumerate.
      */
-    public OrderGraphEnumeratorSplit(AssignmentProblem problem) {
+    public OrderGraphEnumerator(AssignmentProblem problem) {
         this(problem, EnumeratorConfig.defaults());
     }
 
     /**
-     * Constructor for OrderGraphEnumeratorSplit.
+     * Constructor for OrderGraphEnumerator.
      * @param problem The assignment problem to enumerate.
      * @param config  Feature flags controlling optional optimizations.
      */
-    public OrderGraphEnumeratorSplit(AssignmentProblem problem, EnumeratorConfig config) {
+    public OrderGraphEnumerator(AssignmentProblem problem, EnumeratorConfig config) {
         this.problem = problem;
         this.config  = config;
 
@@ -77,7 +275,7 @@ public class OrderGraphEnumeratorSplit {
     public List<AssignmentSolution> enumerate(int k) {
         // initialize data structures
         List<AssignmentSolution> topK = new ArrayList<>();
-        this.cache = new OrderGraphCacheSplit(this.problem.numRows,
+        this.cache = new OrderGraphCache(this.problem.numRows,
                                          this.problem.numCols,
                                          this.config);
 
@@ -463,7 +661,7 @@ public class OrderGraphEnumeratorSplit {
             LoggingMode.NONE  // loggingMode: NONE, PQ_CACHE_SIZE, or ALL
         );
 
-        OrderGraphEnumeratorSplit ogEnumerator = new OrderGraphEnumeratorSplit(problem, config);
+        OrderGraphEnumerator ogEnumerator = new OrderGraphEnumerator(problem, config);
         MurtyEnumerator mEnumerator = new MurtyEnumerator(problem);
 
         System.out.println("enumerating...");
