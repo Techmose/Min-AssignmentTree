@@ -78,9 +78,9 @@ public class OrderGraphEXPEnumerator {
                 int pathCost = pqNode.pathCost + lastCost(newPath);
 
                 //Check if node cost in within bounds (Cheaper than the current Max) if not, skip it
-                if (pq.peekMax() == null) {
-                    //Do nothing, we can add this node to the queue
-                } else if (pathCost > pq.peekMax().pathCost) {
+                if (pq.isFull() && pathCost > pq.peekMax().cost) {
+                // move the child index to the next column, even if we skip it
+                    childIndex++;
                     continue;
                 }
                 
@@ -106,15 +106,16 @@ public class OrderGraphEXPEnumerator {
                 PQNode newNode = new PQNode(newCost,newPath,pathCost,childOgNode);
 
                 //If pq isn't full yet, insert the new node.  If it is full, replace the max with the new node, we already checked that it's cheaper
-                if (pq.size() < k)
+                if (pq.size() < k){
                     pq.qInsert(newNode);
-                else {
+                }
+                else if (newNode.compareTo(pq.peekMax()) < 0){
                     pq.qReplaceMax(newNode);
                 }
                 
             }
         }
-
+        printCacheStats();
         return topK;
     }
 
