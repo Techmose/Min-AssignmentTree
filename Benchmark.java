@@ -236,6 +236,9 @@ public class Benchmark {
 
             }
         }
+        else {
+            System.out.println("Size mismatch: " + r1.solution.size() + " != " + r2.solution.size());
+        }
         if (match) System.out.println("Sanity Check " + label);
     }
 }

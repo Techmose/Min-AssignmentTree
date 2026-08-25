@@ -1,6 +1,5 @@
 import java.util.ArrayList;
 import java.util.List;
-import java.util.PriorityQueue;
 
 /**
  * Algorithm for enumerating the top-k best solutions to the
@@ -37,7 +36,7 @@ public class MurtyEnumerator {
     public List<AssignmentSolution> enumerate(int k) {
         // initialize data structures
         List<AssignmentSolution> topK = new ArrayList<>();
-        PriorityQueue<MurtyNode> pq = new PriorityQueue<>();
+        MurtyQueue pq = new MurtyQueue(k);
         int[][] costMatrix = this.problem.costMatrix;
 
         // initial solution
@@ -47,11 +46,11 @@ public class MurtyEnumerator {
         List<int[]> exclusions = new ArrayList<>();
         List<int[]> inclusions = new ArrayList<>();
         MurtyNode node = new MurtyNode(baseSolution,exclusions,inclusions);
-        pq.offer(node);
+        pq.qInsert(node);
 
         while (topK.size() < k && !pq.isEmpty()) {
             // pop best solution
-            node = pq.poll();
+            node = pq.qPopMin();
             topK.add(node.solution);
 
             int[] currentAssignment = node.solution.assignment;
@@ -83,13 +82,17 @@ public class MurtyEnumerator {
                 if (solution.cost >= this.problem.infinity)
                     continue;
 
-                // Calculate actual cost and add to queue
+                // Calculate actual cost and add to MurtyQueue
                 int actualCost = AssignmentProblem.cost(costMatrix, solution.assignment);
                 solution.cost = actualCost;
-                pq.offer(new MurtyNode(solution, newExclusions, newInclusions));
+                if (pq.size() < k){
+                    pq.qInsert(new MurtyNode(solution, newExclusions, newInclusions));
+                } else if (actualCost < pq.peekMax().solution.cost) {
+                    pq.qReplaceMax(new MurtyNode(solution, newExclusions, newInclusions));
+                }
             }
         }
-
+        printCacheStats();
         return topK;
     }
 

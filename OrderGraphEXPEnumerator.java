@@ -46,19 +46,20 @@ public class OrderGraphEXPEnumerator {
         OrderGraphEXPNode root = this.graph.makeRoot(solution.cost);
 
         // initialize priority queue
-        Queue<PQNode> pq = new Queue<>(k);
+        Queue pq = new Queue(k);
         //List<Integer> path = new ArrayList<Integer>();
         OrderGraphPath path = OrderGraphPath.emptyPath();
         PQNode pqNode = new PQNode(solution.cost,path,0,root);
         pq.qInsert(pqNode);
+        
 
         while (topK.size() < k && !pq.isEmpty()) {
             // pop best solution
             pqNode = pq.qPopMin();
-
             if (pqNode.path.size() == this.problem.numRows) {
                 // found a leaf node
                 topK.add(pqNode.solution());
+                pq.maxSize--;
                 continue;
             }
 
@@ -78,7 +79,7 @@ public class OrderGraphEXPEnumerator {
                 int pathCost = pqNode.pathCost + lastCost(newPath);
 
                 //Check if node cost in within bounds (Cheaper than the current Max) if not, skip it
-                if (pq.isFull() && pathCost > pq.peekMax().cost) {
+                if ( pq.isFull() && pathCost > pq.peekMax().cost) {
                 // move the child index to the next column, even if we skip it
                     childIndex++;
                     continue;
@@ -106,10 +107,10 @@ public class OrderGraphEXPEnumerator {
                 PQNode newNode = new PQNode(newCost,newPath,pathCost,childOgNode);
 
                 //If pq isn't full yet, insert the new node.  If it is full, replace the max with the new node, we already checked that it's cheaper
-                if (pq.size() < k){
+                if (!pq.isFull()) {
                     pq.qInsert(newNode);
                 }
-                else if (newNode.compareTo(pq.peekMax()) < 0){
+                else if ((pq.maxSize() != 0) && newNode.compareTo(pq.peekMax()) < 0){
                     pq.qReplaceMax(newNode);
                 }
                 
@@ -184,7 +185,8 @@ public class OrderGraphEXPEnumerator {
 
     public static void main(String[] args) {
         int n = 10;
-        int k = 3628800;
+        //int k = 100000;
+        int k = 3628800/2;
         //int n = 40;
         //int k = 110000;
         int bound = 10;
@@ -340,6 +342,7 @@ class PQNode implements Comparable<PQNode> {
      * This is for ordering nodes in the priority queue.  Order by
      * cost.
      */
+    @Override
     public int compareTo(PQNode other) {
         if (this.cost < other.cost)
             return -1;

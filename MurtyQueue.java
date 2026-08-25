@@ -1,7 +1,7 @@
 import java.util.NoSuchElementException;
 
 /**
- * Queue<T>
+ * Queue
  *
  * A double-ended priority queue with a fixed capacity, set once at
  * construction. Backed by a single array using the interval-heap layout:
@@ -17,15 +17,15 @@ import java.util.NoSuchElementException;
  * global minimum, arr[1] is always the global maximum -- O(1) peek at
  * both ends.
  */
-public class Queue{
+public class MurtyQueue{
 
-    private final PQNode[] arr;
+    private final MurtyNode[] arr;
     private int size;
     public int maxSize;
 
-    public Queue(int capacity) {
+    public MurtyQueue(int capacity) {
         if (capacity < 1) throw new IllegalArgumentException("capacity must be >= 1");
-        arr = new PQNode[capacity];
+        arr = new MurtyNode[capacity];
         size = 0;
         maxSize = capacity;
     }
@@ -41,24 +41,24 @@ public class Queue{
     public boolean isFull() { return size == maxSize; }
 
     @SuppressWarnings("unchecked")
-    private PQNode at(int i) { return (PQNode) arr[i]; }
+    private MurtyNode at(int i) { return (MurtyNode) arr[i]; }
 
-    private void put(int i, PQNode v) { arr[i] = v; }
+    private void put(int i, MurtyNode v) { arr[i] = v; }
 
     private void swap(int i, int j) {
-        PQNode tmp = at(i);
+        MurtyNode tmp = at(i);
         put(i, at(j));
         put(j, tmp);
     }
 
     /** O(1) peek at the current minimum. */
-    public PQNode peekMin() {
+    public MurtyNode peekMin() {
         if (size == 0) throw new NoSuchElementException("heap is empty");
         return at(0);
     }
 
     /** O(1) peek at the current maximum. */
-    public PQNode peekMax() {
+    public MurtyNode peekMax() {
         if (size == 0) {
             return null;
         } else {
@@ -71,7 +71,7 @@ public class Queue{
     // (which never needs to grow), but the natural operation to add here.
     // -------------------------------------------------------------------
 
-    public void qInsert(PQNode value) {
+    public void qInsert(MurtyNode value) {
         if (size >= arr.length) throw new IllegalStateException("heap is at capacity");
         int pos = size;
         size++;
@@ -150,11 +150,11 @@ public class Queue{
     // qPopMin -- removes and returns the minimum, shrinking the heap by one.
     // -------------------------------------------------------------------
 
-    public PQNode qPopMin() {
+    public MurtyNode qPopMin() {
         if (size == 0) throw new NoSuchElementException("heap is empty");
         int newSize = size - 1;
 
-        PQNode removedMin = at(0);
+        MurtyNode removedMin = at(0);
         if (newSize == 0) {
             put(0, null);
             size = 0;
@@ -163,7 +163,7 @@ public class Queue{
 
         // the last element is about to fall outside the smaller heap --
         // reuse it to fill the gap left at the root, sifting it DOWN
-        PQNode candidate = at(newSize);
+        MurtyNode candidate = at(newSize);
         siftDown(candidate, newSize);
         put(newSize, null);
         size = newSize;
@@ -177,16 +177,16 @@ public class Queue{
      * that node as candidate passes through. `limit` is the heap size
      * candidate is being placed into (already shrunk by one).
      */
-    private void siftDown(PQNode candidate, int limit) {
+    private void siftDown(MurtyNode candidate, int limit) {
         int pos = 0;
         int childpos = 2;
 
         while (childpos < limit) {
-            PQNode childVal = at(childpos);
+            MurtyNode childVal = at(childpos);
 
             int rightpos = childpos + 2;
             if (rightpos < limit) {
-                PQNode rightVal = at(rightpos);
+                MurtyNode rightVal = at(rightpos);
                 if (rightVal.compareTo(childVal) < 0) {
                     childpos = rightpos;
                     childVal = rightVal;
@@ -201,7 +201,7 @@ public class Queue{
 
             rightpos = childpos + 1;
             if (rightpos < limit) {
-                PQNode hiVal = at(rightpos);
+                MurtyNode hiVal = at(rightpos);
                 if (candidate.compareTo(hiVal) > 0) {
                     put(rightpos, candidate);
                     candidate = hiVal;
@@ -232,7 +232,7 @@ public class Queue{
     // "corner case" handling below with no equivalent on the min side.
     // -------------------------------------------------------------------
 
-    public PQNode qReplaceMax(PQNode value) {
+    public MurtyNode qReplaceMax(MurtyNode value) {
         if (size == 0) throw new NoSuchElementException("heap is empty");
 
         if (size == 1) {
@@ -240,11 +240,11 @@ public class Queue{
             return value;
         }
 
-        PQNode candidate = value;
+        MurtyNode candidate = value;
         int pos = 1;
         int childpos = 3;
 
-        PQNode loVal = at(0);
+        MurtyNode loVal = at(0);
         if (candidate.compareTo(loVal) < 0) {
             put(0, candidate);
             candidate = loVal;
@@ -253,10 +253,10 @@ public class Queue{
         int sizeLimit = (size - 2) & -4;
 
         while (childpos < sizeLimit) {
-            PQNode childVal = at(childpos);
+            MurtyNode childVal = at(childpos);
 
             int rightpos = childpos + 2;
-            PQNode rightVal = at(rightpos);
+            MurtyNode rightVal = at(rightpos);
             if (rightVal.compareTo(childVal) > 0) {
                 childpos = rightpos;
                 childVal = rightVal;
