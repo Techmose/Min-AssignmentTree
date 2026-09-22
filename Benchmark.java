@@ -87,10 +87,10 @@ public class Benchmark {
                     allResults.add(r1);
                     System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
 
-                    BenchmarkResult r5 = runOrderGraphEXP_OLD(problem, n, k);
-                    writeCsvRow(csv, r5);
-                    allResults.add(r5);
-                    System.out.printf("    %-10s  %.4fs%n", r5.config, r5.timeNs * 1e-9);
+                    //BenchmarkResult r5 = runOrderGraphEXP_OLD(problem, n, k);
+                    //writeCsvRow(csv, r5);
+                    //allResults.add(r5);
+                    //System.out.printf("    %-10s  %.4fs%n", r5.config, r5.timeNs * 1e-9);
 
                     // OG_TFFF — cache eviction on, everything else off
                     //BenchmarkResult r2 = runOrderGraph(problem, n, k,
@@ -106,16 +106,21 @@ public class Benchmark {
                     allResults.add(r3);
                     System.out.printf("    %-10s  %.4fs%n", r3.config, r3.timeNs * 1e-9);
 
-                    BenchmarkResult r4 = runMurtyOLD(problem, n, k);
-                    writeCsvRow(csv, r4);
-                    allResults.add(r4);
-                    System.out.printf("    %-10s  %.4fs%n", r4.config, r4.timeNs * 1e-9);
-
+                    //BenchmarkResult r4 = runMurtyOLD(problem, n, k);
+                    //writeCsvRow(csv, r4);
+                    //allResults.add(r4);
+                    //System.out.printf("    %-10s  %.4fs%n", r4.config, r4.timeNs * 1e-9);
+                    
+                    // Fast Murty Cache
+                    BenchmarkResult r5 = runFastCache(problem, n, k);
+                    writeCsvRow(csv, r5);
+                    allResults.add(r5);
+                    System.out.printf("    %-10s  %.4fs%n", r5.config, r5.timeNs * 1e-9);
 
                     System.out.println();
                     sanityCheck(r3, r1, "OGE vs MURTY");
-                    sanityCheck(r3, r5, "OGE_OLD vs MURTY");
-                    sanityCheck(r3, r4, "MURTY_OLD vs MURTY");
+                    sanityCheck(r3, r5, "FastCache vs MURTY");
+                    //sanityCheck(r3, r4, "MURTY_OLD vs MURTY");
                 }
                 System.out.println();
             }
@@ -182,6 +187,16 @@ public class Benchmark {
         OGE = null;
         System.gc();
         return new BenchmarkResult(n, k, SEED,"OGE_OLD", elapsed, solution);
+    }
+
+    static BenchmarkResult runFastCache(AssignmentProblem problem, int n, int k){
+        FastCacheEnumerator FCM = new FastCacheEnumerator(problem);
+        long t0 = System.nanoTime();
+        List<AssignmentSolution> solution = FCM.enumerate(k);
+        long elapsed = System.nanoTime() - t0;
+        FCM = null;
+        System.gc();
+        return new BenchmarkResult(n, k, SEED,"FCM", elapsed, solution);
     }
 
 

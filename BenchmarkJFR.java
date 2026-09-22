@@ -16,15 +16,15 @@ class AlgorithmEvent extends Event {
 
 public class BenchmarkJFR {
 
-    static final int   MAX_N       = 30;
+    static final int   MAX_N       = 40;
     static final int[] N_VALUES    = buildNValues(MAX_N);
-    static final int[] K_VALUES    = { 10000, 100000 };
+    static final int[] K_VALUES    = { 100000, 200000 };
     static final long  SEED        = 42L;
     static final int   COST_RANGE  = 999999; // restore realistic range
 
     static int[] buildNValues(int maxN) {
         java.util.List<Integer> vals = new java.util.ArrayList<>();
-        for (int n = 30; n <= maxN; n += 2)
+        for (int n = 20; n <= maxN; n += 5)
             vals.add(n);
         return vals.stream().mapToInt(Integer::intValue).toArray();
     }
@@ -32,10 +32,11 @@ public class BenchmarkJFR {
     public static void main(String[] args) throws IOException {
 
         Recording rec = new Recording();
-        rec.enable("jdk.ExecutionSample")   .withPeriod(Duration.ofMillis(10)); // finer sampling
-        rec.enable("jdk.NativeMethodSample").withPeriod(Duration.ofMillis(10));
+        rec.enable("jdk.ExecutionSample")   .withPeriod(Duration.ofMillis(1)); // finer sampling
+        rec.enable("jdk.NativeMethodSample").withPeriod(Duration.ofMillis(1));
         rec.enable("jdk.CPULoad")           .withPeriod(Duration.ofMillis(100));
         rec.enable("jdk.ThreadCPULoad")     .withPeriod(Duration.ofMillis(100));
+        rec.enable("jdk.MemoryAllocationSample").withPeriod(Duration.ofMillis(10));
         rec.enable("jdk.GarbageCollection");
         rec.enable("jdk.GCPhasePause");     // see GC pauses on timeline
 
@@ -56,7 +57,6 @@ public class BenchmarkJFR {
                 //    new EnumeratorConfig(true, false, false, LoggingMode.NONE), "OG_TFFF");
                 
                 runOther(problem, n, k);
-                //runSplit(problem, n, k);
                 runMurty(problem, n, k);
             }
         }
@@ -102,26 +102,13 @@ public class BenchmarkJFR {
         e.k = k;
         e.begin();
 
-        OrderGraphEnumeratorOG other = new OrderGraphEnumeratorOG(problem);
+        OrderGraphEXPEnumerator other = new OrderGraphEXPEnumerator(problem);
         other.enumerate(k);
         other = null;
 
         e.commit();
     }
 
-    // static void runSplit(AssignmentProblem problem, int n, int k) {
-    //     AlgorithmEvent e = new AlgorithmEvent();
-    //     e.algorithm = "SPLIT";
-    //     e.n = n;
-    //     e.k = k;
-    //     e.begin();
-
-    //     OrderGraphEnumeratorSplit split = new OrderGraphEnumeratorSplit(problem);
-    //     split.enumerate(k);
-    //     split = null;
-
-    //     e.commit();
-    // }
 
     static int[][] randomMatrix(int n, int costRange, long seed) {
         Random rng = new Random(seed);

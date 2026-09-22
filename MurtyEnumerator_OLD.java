@@ -1,12 +1,13 @@
 import java.util.ArrayList;
 import java.util.List;
+import java.util.PriorityQueue;
 
 /**
  * Algorithm for enumerating the top-k best solutions to the
  * assignment problem.  This algorithm is based on Murty's enumerator.
  *
  */
-public class MurtyEnumerator {
+public class MurtyEnumerator_OLD {
     AssignmentProblem problem;
     Hungarian hungarian;
     // reusable space for cost matrix
@@ -22,7 +23,7 @@ public class MurtyEnumerator {
      * Constructor for MurtyEnumerator
      * @param costMatrix of the assignment problem to enumerate
      */
-    public MurtyEnumerator(AssignmentProblem problem) {
+    public MurtyEnumerator_OLD(AssignmentProblem problem) {
         this.problem = problem;
         this.hungarian  = new Hungarian(problem);
         this.scratchMatrix = new int[problem.numRows][problem.numCols];
@@ -36,7 +37,7 @@ public class MurtyEnumerator {
     public List<AssignmentSolution> enumerate(int k) {
         // initialize data structures
         List<AssignmentSolution> topK = new ArrayList<>();
-        MurtyQueue pq = new MurtyQueue(k);
+        PriorityQueue<MurtyNode> pq = new PriorityQueue<>();
         int[][] costMatrix = this.problem.costMatrix;
 
         // initial solution
@@ -46,11 +47,11 @@ public class MurtyEnumerator {
         List<int[]> exclusions = new ArrayList<>();
         List<int[]> inclusions = new ArrayList<>();
         MurtyNode node = new MurtyNode(baseSolution,exclusions,inclusions);
-        pq.qInsert(node);
+        pq.offer(node);
 
         while (topK.size() < k && !pq.isEmpty()) {
             // pop best solution
-            node = pq.qPopMin();
+            node = pq.poll();
             topK.add(node.solution);
 
             int[] currentAssignment = node.solution.assignment;
@@ -64,7 +65,6 @@ public class MurtyEnumerator {
 
             for (int i = startPos; i < n; i++) {
                 // Build new inclusions: force all assignments from startPos to i-1
-                //Somewhere in the loop need to sort by cost 
                 List<int[]> newInclusions = new ArrayList<>(node.inclusions);
                 for (int j = startPos; j < i; j++)
                     newInclusions.add(new int[]{j, currentAssignment[j]});
@@ -83,17 +83,13 @@ public class MurtyEnumerator {
                 if (solution.cost >= this.problem.infinity)
                     continue;
 
-                // Calculate actual cost and add to MurtyQueue
+                // Calculate actual cost and add to queue
                 int actualCost = AssignmentProblem.cost(costMatrix, solution.assignment);
                 solution.cost = actualCost;
-                if (pq.size() < k){
-                    pq.qInsert(new MurtyNode(solution, newExclusions, newInclusions));
-                } else if (actualCost < pq.peekMax().solution.cost) {
-                    pq.qReplaceMax(new MurtyNode(solution, newExclusions, newInclusions));
-                }
+                pq.offer(new MurtyNode(solution, newExclusions, newInclusions));
             }
         }
-        printCacheStats();
+
         return topK;
     }
 
@@ -166,19 +162,3 @@ public class MurtyEnumerator {
 
 }
 
-class MurtyNode implements Comparable<MurtyNode> {
-    public AssignmentSolution solution;
-    public List<int[]> exclusions;
-    public List<int[]> inclusions;
-
-    public MurtyNode(AssignmentSolution solution, List<int[]> exclusions, List<int[]> inclusions) {
-        this.solution = solution;
-        this.exclusions = exclusions;
-        this.inclusions = inclusions;
-    }
-
-    @Override
-    public int compareTo(MurtyNode other) {
-        return Integer.compare(this.solution.cost, other.solution.cost);
-    }
-}

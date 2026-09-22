@@ -1,6 +1,7 @@
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
+import java.util.PriorityQueue;
 import java.util.Random;
 
 /**
@@ -9,7 +10,7 @@ import java.util.Random;
  * Graph.
  *
  */
-public class OrderGraphEXPEnumerator {
+public class OrderGraphEXPEnumerator_OLD {
     AssignmentProblem problem;
     OrderGraphEXP graph;
 
@@ -18,10 +19,10 @@ public class OrderGraphEXPEnumerator {
     long totalTime;
 
     /**
-     * Constructor for OrderGraphEXPEnumerator
+     * Constructor for OrderGraphEXPEnumerator_OLD
      * @param costMatrix of the assignment problem to enumerate
      */
-    public OrderGraphEXPEnumerator(AssignmentProblem problem) {
+    public OrderGraphEXPEnumerator_OLD(AssignmentProblem problem) {
         this.problem = problem;
 
         // stats for algorithm performance
@@ -45,23 +46,53 @@ public class OrderGraphEXPEnumerator {
         this.graph = new OrderGraphEXP(this.problem);
         OrderGraphEXPNode root = this.graph.makeRoot(solution.cost);
 
+        // persisted lower bound for PQ reduction; Integer.MAX_VALUE means no bound yet
+        int pqLowerBound = Integer.MAX_VALUE;
+
         // initialize priority queue
-        Queue pq = new Queue(k);
+        PriorityQueue<PQNode> pq = new PriorityQueue<>();
         //List<Integer> path = new ArrayList<Integer>();
         OrderGraphPath path = OrderGraphPath.emptyPath();
         PQNode pqNode = new PQNode(solution.cost,path,0,root);
-        pq.qInsert(pqNode);
-        
+        pq.add(pqNode);
 
         while (topK.size() < k && !pq.isEmpty()) {
             // pop best solution
-            pqNode = pq.qPopMin();
+            pqNode = pq.poll();
+
             if (pqNode.path.size() == this.problem.numRows) {
                 // found a leaf node
                 topK.add(pqNode.solution());
-                pq.maxSize--;
                 continue;
             }
+
+            // --- PQ size reduction ---
+            // Use quickselect to partition the PQ contents around the k-th cheapest
+            // node in O(n) average time, then re-heapify only the k survivors.
+            //
+            // Complexity: O(n) quickselect + O(k) heapify = O(n) average overall.
+            // The previous max-heap approach was O(n log k); full sort was O(n log n).
+            // if (pq.size() > 2 * k) {
+            //     // Drain PQ into a flat array for in-place partitioning.
+            //     // toArray avoids an extra copy vs. new ArrayList<>(pq).
+            //     @SuppressWarnings("unchecked")
+            //     OrderGraphEXPNode[] arr = pq.toArray(new OrderGraphEXPNode[0]);
+
+            //     // Partition so arr[0..k-1] are the k cheapest (unsorted),
+            //     // arr[k] is the k-th cheapest, and arr[k+1..] are more expensive.
+            //     quickselect(arr, 0, arr.length - 1, k - 1);
+
+            //     // arr[k-1] is now the k-th cheapest — its cost is the new bound.
+            //     int newBound = arr[k - 1].value;
+            //     if (newBound < pqLowerBound)
+            //         pqLowerBound = newBound;
+
+            //     // Re-heapify the k survivors. addAll() on a just-cleared
+            //     // PriorityQueue bulk-loads via sift-down in O(k).
+            //     pq.clear();
+            //     for (int i = 0; i < k; i++)
+            //         pq.add(arr[i]);
+            // }
 
             // get set of used columns
             int childIndex = 0;
@@ -78,13 +109,10 @@ public class OrderGraphEXPEnumerator {
                 // combine cost to node and cost of node
                 int pathCost = pqNode.pathCost + lastCost(newPath);
 
-                //Check if node cost in within bounds (Cheaper than the current Max) if not, skip it
-                if ( pq.isFull() && pathCost > pq.peekMax().cost) {
-                // move the child index to the next column, even if we skip it
-                    childIndex++;
+                //Check if node cost in within bounds if not, skip it
+                if (pathCost > pqLowerBound)
                     continue;
-                }
-                
+
                 // check if sub-problem has been solved before
                 OrderGraphEXPNode ogNode = pqNode.ogNode;
                 OrderGraphEXPNode childOgNode;
@@ -105,18 +133,10 @@ public class OrderGraphEXPEnumerator {
                 */
                 // push child onto pq
                 PQNode newNode = new PQNode(newCost,newPath,pathCost,childOgNode);
-
-                //If pq isn't full yet, insert the new node.  If it is full, replace the max with the new node, we already checked that it's cheaper
-                if (!pq.isFull()) {
-                    pq.qInsert(newNode);
-                }
-                else if ((pq.maxSize() != 0) && newNode.compareTo(pq.peekMax()) < 0){
-                    pq.qReplaceMax(newNode);
-                }
-                
+                pq.add(newNode);
             }
         }
-        printCacheStats();
+
         return topK;
     }
 
@@ -185,8 +205,7 @@ public class OrderGraphEXPEnumerator {
 
     public static void main(String[] args) {
         int n = 10;
-        //int k = 100000;
-        int k = 3628800/2;
+        int k = 3628800;
         //int n = 40;
         //int k = 110000;
         int bound = 10;
@@ -204,7 +223,7 @@ public class OrderGraphEXPEnumerator {
                 costMatrix[i][j] = r.nextInt(bound);
 
         AssignmentProblem problem = new AssignmentProblem(costMatrix);
-        OrderGraphEXPEnumerator ogEnumerator = new OrderGraphEXPEnumerator(problem);
+        OrderGraphEXPEnumerator_OLD ogEnumerator = new OrderGraphEXPEnumerator_OLD(problem);
         MurtyEnumerator mEnumerator = new MurtyEnumerator(problem);
 
         List<AssignmentSolution> topK = null;
@@ -274,60 +293,45 @@ public class OrderGraphEXPEnumerator {
         }
     }
 
-}
-
-/**
- * Used by Order Graph Enumerator.
- */
-class PQNode implements Comparable<PQNode> {
-    OrderGraphEXPNode ogNode;
-    int cost;
-    OrderGraphPath path;
-    int pathCost;
-    int length;
-    int id;
-    static int id_counter = 0;
-
-    public PQNode(int cost, OrderGraphPath path, int pathCost, OrderGraphEXPNode ogNode) {
-        this.cost = cost;
-        this.ogNode = ogNode;
-        this.path = path;
-        this.pathCost = pathCost;
-        this.length = path.size();
-        this.id = id_counter++;
-    }
-
     /**
-     * This is for ordering nodes in the priority queue.  Order by
-     * cost.
+     * Quickselect: rearranges arr[lo..hi] so that arr[0..k] contains the
+     * (k+1) cheapest nodes (by cost ascending) and arr[k] is exactly the
+     * (k+1)-th cheapest. Elements within each partition are in no particular order.
+     *
+     * Average O(n), worst-case O(n²) — median-of-three pivot selection keeps
+     * the worst case rare in practice without needing a random number generator.
      */
-    @Override
-    public int compareTo(PQNode other) {
-        if (this.cost < other.cost)
-            return -1;
-        else if (this.cost > other.cost)
-            return 1;
-        else  {
-            if (this.length > other.length)
-                return -1;
-            else if (this.length < other.length)
-                return 1;
-            else {
-                if (this.id < other.id) return -1;
-                else if (this.id > other.id) return 1;
-                else return 0;
-            }
+    private static void quickselect(OrderGraphEXPNode[] arr, int lo, int hi, int k) {
+        while (lo < hi) {
+            // Median-of-three pivot: compare lo, mid, hi and put the median at hi
+            int mid = lo + (hi - lo) / 2;
+            if (arr[lo].value > arr[mid].value) swap(arr, lo, mid);
+            if (arr[lo].value > arr[hi].value)  swap(arr, lo, hi);
+            if (arr[mid].value > arr[hi].value) swap(arr, mid, hi);
+            // arr[mid] is now the median; move it to hi-1 as the pivot
+            swap(arr, mid, hi);
+            int pivot = partition(arr, lo, hi);
+            if      (pivot == k) return;
+            else if (pivot  < k) lo = pivot + 1;
+            else                 hi = pivot - 1;
         }
     }
 
-    public AssignmentSolution solution() {
-        int[] sol = new int[this.length];
-        int i = this.length-1;
-        OrderGraphPath path = this.path;
-        while (!path.isEnd()) {
-            sol[i--] = path.value();
-            path = path.next();
+    /** Lomuto partition around arr[hi]; returns final pivot index. */
+    private static int partition(OrderGraphEXPNode[] arr, int lo, int hi) {
+        int pivotCost = arr[hi].value;
+        int i = lo;
+        for (int j = lo; j < hi; j++) {
+            if (arr[j].value <= pivotCost)
+                swap(arr, i++, j);
         }
-        return new AssignmentSolution(sol,this.cost);
+        swap(arr, i, hi);
+        return i;
+    }
+
+    private static void swap(OrderGraphEXPNode[] arr, int i, int j) {
+        OrderGraphEXPNode tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
     }
 }
