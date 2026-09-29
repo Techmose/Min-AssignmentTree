@@ -8,36 +8,13 @@ import java.util.Set;
 /**
  * Enumerates the top-k solutions to an assignment problem using the
  * same tree-partitioning scheme as MurtyEnumerator/MurtyCacheEnumerator
- * (fix a prefix of rows, exclude the next row's current column), but:
- *
- *  1. Solves each child incrementally (FastHungarian.solveStep), warm
- *     started from its immediate parent's dual state, instead of
- *     rebuilding the cost matrix and re-running the full Hungarian
- *     algorithm -- this is fastmurty's actual speedup.
- *  2. Layers a subproblem-equivalence cache on top (same equivalence
- *     notion as MurtyCacheEnumerator: free columns + live exclusions).
- *     The cache stores the free submatrix's OWN cost and dual state --
- *     not the branch's total cost -- because the free submatrix's
- *     optimum is a pure function of the key (which free rows/columns,
- *     which live exclusions), whereas the total cost also depends on
- *     which specific columns THIS branch's fixed rows happen to occupy
- *     among the shared non-free set, which can differ between branches
- *     that reach the same key. A hit reconstructs the total as (this
- *     branch's own fixed-row cost) + (the cached free-submatrix cost),
- *     needing no re-solve and no full-matrix recomputation.
- *
- * MurtyQueue is used completely unmodified: it is typed to MurtyNode,
- * so FastMurtyNode (below) simply extends MurtyNode to carry the extra
- * per-node dual state the queue itself has no field for, and every
- * MurtyQueue method accepts it like any other MurtyNode.
  */
 public class FastCacheEnumerator {
     AssignmentProblem problem;
     FastHungarian solver;
 
     // subproblem-equivalence cache: same notion as MurtyCacheEnumerator,
-    // but storing only the free submatrix's own cost + dual state (see
-    // class doc)
+    // but storing only the free submatrix's own cost + dual state 
     Map<FastSubproblemKey, FastState> subproblemCache = new HashMap<>();
 
     // stats
@@ -134,18 +111,8 @@ public class FastCacheEnumerator {
                 int[] childAssignment;
                 if (childState != null) {
                     cacheHits++;
-                    // Reuse the cached free-submatrix solve as-is -- its
-                    // dual state and freeCost are already correct and
-                    // branch-independent. The total cost is a plain O(1)
-                    // sum. We deliberately do NOT clone/merge the state's
-                    // fixed-row portion here: that's only needed if this
-                    // child is later popped and split further, which most
-                    // inserted candidates never are. We do still need the
-                    // reported ASSIGNMENT ARRAY right now (it's the
-                    // solution itself, and becomes `currentAssignment` if
-                    // this node is popped later) -- but building just that
-                    // one array is far cheaper than cloning all four of
-                    // the state's internal dual/matching arrays.
+                    // Reuse the cached free-submatrix solve as-is
+                    
                     childTotalCost = fixedRowsCost + childState.freeCost;
                     childAssignment = buildHitAssignment(newInclusions, childState);
                     childMerged = false;
@@ -199,6 +166,7 @@ public class FastCacheEnumerator {
                 prefixCost += costMatrix[i][currentAssignment[i]];
             }
         }
+        printStats();
         return topK;
     }
 
@@ -304,8 +272,7 @@ public class FastCacheEnumerator {
  *
  * `merged` is false exactly when `state` is a cache hit's raw,
  * unmerged free-submatrix state (still belongs to whichever branch
- * discovered that subproblem first) -- see enumerate()'s pop-time lazy
- * merge. It's true for the root, for any solveStep-produced (cache
+ * discovered that subproblem first). It's true for the root, for any solveStep-produced (cache
  * miss) state, and for any cache-hit state that has already been
  * merged because this node was popped once already.
  */

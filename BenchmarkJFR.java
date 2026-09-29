@@ -56,8 +56,9 @@ public class BenchmarkJFR {
                 //runOrderGraph(problem, n, k,
                 //    new EnumeratorConfig(true, false, false, LoggingMode.NONE), "OG_TFFF");
                 
-                runOther(problem, n, k);
+                //runOther(problem, n, k);
                 runMurty(problem, n, k);
+                runFastCache(problem, n, k);
             }
         }
 
@@ -105,6 +106,20 @@ public class BenchmarkJFR {
         OrderGraphEXPEnumerator other = new OrderGraphEXPEnumerator(problem);
         other.enumerate(k);
         other = null;
+
+        e.commit();
+    }
+
+    static void runFastCache(AssignmentProblem problem, int n, int k) {
+        AlgorithmEvent e = new AlgorithmEvent();
+        e.algorithm = "FAST_CACHE";
+        e.n = n;
+        e.k = k;
+        e.begin();
+
+        FastCacheEnumerator fastCache = new FastCacheEnumerator(problem);
+        fastCache.enumerate(k);
+        fastCache = null;
 
         e.commit();
     }
