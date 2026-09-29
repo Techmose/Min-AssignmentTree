@@ -132,30 +132,9 @@ public class FastHungarian {
             excludedCols1Idx[k] = allExcludedColsZeroIdxForRow[k] + 1;
         }
 
-        // NOTE: we deliberately do not trust the search's own running
-        // "minDistance" as the exact cost delta here. That identity
-        // (final Dijkstra distance == total cost change) only holds
-        // cleanly when the row being augmented starts from a fresh
-        // (zero) price, as in a from-scratch build-up. Here the row
-        // being re-matched already carries a nonzero warm-started price
-        // from the parent, and its augmenting path can cascade through
-        // other already-matched rows -- so we run the search to
-        // completion (still far cheaper than a full Hungarian rebuild)
-        // and get the exact cost by directly re-summing the resulting
-        // assignment, which is always correct regardless of any of the
-        // above. costBound pruning still happens, just after the search
-        // instead of trying to bound it mid-search.
         augmentRow(st, excludedRow, excludedCols1Idx, Integer.MAX_VALUE);
 
-        // Infeasibility check: the search only PENALIZES the excluded
-        // edge(s) during the distance computation (a large sentinel), it
-        // never actually removes them -- so when every other option is
-        // unavailable (e.g. all other columns already permanently
-        // claimed by fixed rows), the search can still "succeed" by
-        // falling back to a forbidden edge. AssignmentProblem.cost()
-        // would then silently read the TRUE (non-infinite) matrix value
-        // there and report a bogus low cost that violates this branch's
-        // exclusion constraint. Detect that here and report infeasible.
+        // Infeasibility check: the search only PENALIZES the excluded edge(s) during the distance computation 
         if (isExcludedForRow(excludedCols1Idx, st.rowToColumn[excludedRow])) {
             return null;
         }
