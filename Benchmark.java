@@ -82,10 +82,10 @@ public class Benchmark {
                     System.out.printf("  k=%-8d%n", k);
 
                     // OrderGraphEXP
-                    BenchmarkResult r1 = runOrderGraphEXP(problem, n, k);
-                    writeCsvRow(csv, r1);
-                    allResults.add(r1);
-                    System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
+                    //BenchmarkResult r1 = runOrderGraphEXP(problem, n, k);
+                    //writeCsvRow(csv, r1);
+                    //allResults.add(r1);
+                    //System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
 
                     //BenchmarkResult r5 = runOrderGraphEXP_OLD(problem, n, k);
                     //writeCsvRow(csv, r5);
@@ -117,10 +117,16 @@ public class Benchmark {
                     allResults.add(r5);
                     System.out.printf("    %-10s  %.4fs%n", r5.config, r5.timeNs * 1e-9);
 
+                    // Java Fast Murty
+                    BenchmarkResult r6 = runJavaFastMurty(problem, n, k);
+                    writeCsvRow(csv, r6);
+                    allResults.add(r6);
+                    System.out.printf("    %-10s  %.4fs%n", r6.config, r6.timeNs * 1e-9);
+
                     System.out.println();
-                    sanityCheck(r3, r1, "OGE vs MURTY");
+                    //sanityCheck(r3, r1, "OGE vs MURTY");
                     sanityCheck(r3, r5, "FastCache vs MURTY");
-                    //sanityCheck(r3, r4, "MURTY_OLD vs MURTY");
+                    sanityCheck(r3, r6, "JavaFastMurty vs MURTY");
                 }
                 System.out.println();
             }
@@ -197,6 +203,16 @@ public class Benchmark {
         FCM = null;
         System.gc();
         return new BenchmarkResult(n, k, SEED,"FCM", elapsed, solution);
+    }
+
+    static BenchmarkResult runJavaFastMurty(AssignmentProblem problem, int n, int k){
+        JavaFastmurty JFM = new JavaFastmurty(problem);
+        long t0 = System.nanoTime();
+        List<AssignmentSolution> solution = JFM.enumerate(k);
+        long elapsed = System.nanoTime() - t0;
+        JFM = null;
+        System.gc();
+        return new BenchmarkResult(n, k, SEED,"JFM", elapsed, solution);
     }
 
 

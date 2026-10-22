@@ -27,10 +27,17 @@ import java.util.Arrays;
  * Hungarian.java in this project -- this file's augmenting-path search
  * is structurally the same algorithm as Hungarian.solveNext, generalized
  * to (a) start from an already-partially-solved state instead of an
- * empty one, (b) permanently wall off a prefix of "fixed" rows/columns
+ * empty one, (b) permanently wall off a set of "fixed" rows/columns
  * that must never be revisited, and (c) forbid one specific (row,column)
  * edge for the row currently being re-matched, and (d) stop early once
  * a cost bound is provably exceeded.
+ *
+ * Fixed rows can be described two ways:
+ *   - a prefix 1..fixedBoundary (FastState.fixedRow == null), used by
+ *     FastCacheEnumerator via solveStep, or
+ *   - an arbitrary set (FastState.fixedRow != null), used by
+ *     JavaFastmurty via solveStepFixedSet, whose fastmurty-style split
+ *     order fixes rows in a data-dependent order rather than a prefix.
  */
 public class FastHungarian {
 
@@ -45,6 +52,10 @@ public class FastHungarian {
     boolean[] visitedColumn;
     int[] distanceToColumn;
     int[] columnToLastColumn;
+    // the non-fixed columns for the current search -- built once per
+    // search so the inner loops only touch free columns (like
+    // fastmurty's cols2use) instead of scanning all n every iteration
+    int[] freeColumns;
 
     public FastHungarian(AssignmentProblem problem) {
         this.problem = problem;
@@ -53,6 +64,7 @@ public class FastHungarian {
         this.visitedColumn = new boolean[size + 1];
         this.distanceToColumn = new int[size + 1];
         this.columnToLastColumn = new int[size + 1];
+        this.freeColumns = new int[size + 1];
     }
 
     /**
@@ -66,7 +78,7 @@ public class FastHungarian {
     public FastState solveFull() {
         FastState st = new FastState(size);
         for (int row = 1; row <= size; row++) {
-            augmentRow(st, row, NO_EXCLUSIONS, Integer.MAX_VALUE);
+            augmentRow(st, row, NO_EXCLUSIONS, Long.MAX_VALUE);
         }
         st.cost = AssignmentProblem.cost(costs, st.assignmentZeroIndexed());
         st.freeCost = st.cost; // root: no rows fixed yet, so free cost == total cost
@@ -96,30 +108,56 @@ public class FastHungarian {
      *                                 [0, newFixedBoundaryZeroIdx) keep
      *                                 the parent's assignment forever)
      * @param fixedRowsCost         the total cost contributed by those
-     *                              same fixed rows (sum of costs[row][its
-     *                              assigned column] for row in
-     *                              [0, newFixedBoundaryZeroIdx)) -- used
-     *                              only to split the recomputed total
-     *                              into (this branch's fixed-row cost,
-     *                              the free submatrix's own cost), so the
-     *                              latter can be cached and reused by a
-     *                              future branch with different fixed
-     *                              rows but the same free submatrix
+     *                              same fixed rows -- used only to split
+     *                              the total into (this branch's
+     *                              fixed-row cost, the free submatrix's
+     *                              own cost), so the latter can be cached
      * @param costBound             prune (return null) as soon as the
      *                              incremental cost increase is provably
      *                              &gt;= costBound -- mirrors spStep's
      *                              early "return inf"
-     * @return a new, independent FastState for the child, with its own
-     *         copied dual state ready to warm-start its own children in
-     *         turn -- or null if costBound was exceeded (the caller
-     *         should treat the child as infeasible/dominated and skip it)
+     * @return a new, independent FastState for the child, or null if
+     *         costBound was exceeded or the row has no allowed column
      */
     public FastState solveStep(FastState parent, int excludedRowZeroIdx,
                                 int[] allExcludedColsZeroIdxForRow,
                                 int newFixedBoundaryZeroIdx, int fixedRowsCost, int costBound) {
         FastState st = parent.copy();
-        int excludedRow = excludedRowZeroIdx + 1;
+        st.fixedRow = null; // prefix mode
         st.fixedBoundary = newFixedBoundaryZeroIdx;
+        if (!stepInPlace(st, parent.cost, excludedRowZeroIdx, allExcludedColsZeroIdxForRow, costBound)) {
+            return null;
+        }
+        // The free submatrix's own cost -- everything except what this
+        // branch's specific fixed rows contribute -- is what's actually
+        // safe to cache and hand to a different branch later.
+        st.freeCost = st.cost - fixedRowsCost;
+        return st;
+    }
+
+    /**
+     * Same as solveStep, but the child's fixed rows are an arbitrary set
+     * instead of a prefix. {@code fixedRowScratch} is indexed by 1-based
+     * row (index 0 unused) and may be a reusable buffer: it is only read
+     * during the search, and cloned into the returned state on success.
+     */
+    public FastState solveStepFixedSet(FastState parent, int excludedRowZeroIdx,
+                                       int[] allExcludedColsZeroIdxForRow,
+                                       boolean[] fixedRowScratch, int costBound) {
+        FastState st = parent.copy();
+        st.fixedRow = fixedRowScratch;
+        if (!stepInPlace(st, parent.cost, excludedRowZeroIdx, allExcludedColsZeroIdxForRow, costBound)) {
+            return null;
+        }
+        st.fixedRow = fixedRowScratch.clone();
+        st.freeCost = st.cost;
+        return st;
+    }
+
+    /** Shared body of solveStep / solveStepFixedSet. Returns false if pruned or infeasible. */
+    private boolean stepInPlace(FastState st, int parentCost, int excludedRowZeroIdx,
+                                int[] allExcludedColsZeroIdxForRow, int costBound) {
+        int excludedRow = excludedRowZeroIdx + 1;
 
         // free the row's old column -- it must not be silently "stuck"
         // pointing back at a row that is about to be re-matched elsewhere
@@ -132,28 +170,29 @@ public class FastHungarian {
             excludedCols1Idx[k] = allExcludedColsZeroIdxForRow[k] + 1;
         }
 
-        augmentRow(st, excludedRow, excludedCols1Idx, Integer.MAX_VALUE);
+        // With a full matching minus one row, the only unmatched column
+        // is oldCol, so the augmenting path's total reduced length is
+        // exactly the child's cost increase over the parent. That lets
+        // the search stop the moment it reaches costBound, and gives the
+        // child's cost without recomputing it over the whole matrix.
+        int increase = augmentRow(st, excludedRow, excludedCols1Idx, costBound);
+        if (increase == PRUNED) {
+            return false;
+        }
 
-        // Infeasibility check: the search only PENALIZES the excluded edge(s) during the distance computation 
+        // Infeasibility check: the search only PENALIZES the excluded edge(s)
         if (isExcludedForRow(excludedCols1Idx, st.rowToColumn[excludedRow])) {
-            return null;
+            return false;
         }
 
-        st.cost = AssignmentProblem.cost(costs, st.assignmentZeroIndexed());
-        if (st.cost >= costBound + parent.cost) {
-            return null;
-        }
-        // The free submatrix's own cost -- everything except what this
-        // branch's specific fixed rows contribute -- is what's actually
-        // safe to cache and hand to a different branch later (see the
-        // param doc above).
-        st.freeCost = st.cost - fixedRowsCost;
-        return st;
+        st.cost = parentCost + increase;
+        return true;
     }
 
     private boolean isFixedColumn(FastState st, int column) {
         int row = st.columnToRow[column];
-        return row != 0 && row <= st.fixedBoundary;
+        if (row == 0) return false;
+        return st.fixedRow != null ? st.fixedRow[row] : row <= st.fixedBoundary;
     }
 
     private boolean isExcludedForRow(int[] excludedCols1Idx, int column) {
@@ -167,55 +206,67 @@ public class FastHungarian {
      * Runs one successive-shortest-augmenting-path search starting from
      * {@code initialRow}, updating st.rowPrice/colPrice/columnToRow/
      * rowToColumn in place to match that row (mutating them exactly as
-     * Hungarian.solveNext does). Rows/columns already claimed by a
-     * permanently fixed row (id &lt;= st.fixedBoundary) are never
-     * considered. If {@code excludedCol} &gt;= 1, the direct
-     * (initialRow, excludedCol) edge is treated as infinitely costly.
+     * Hungarian.solveNext does). Columns claimed by a permanently fixed
+     * row are never considered. Columns in {@code excludedCols1Idx} are
+     * treated as infinitely costly for initialRow.
      *
-     * @return the total incremental cost of matching initialRow (the
-     *         algorithm's final "minDistance"), or PRUNED if the search
-     *         proved it would exceed costBound.
+     * @return the total reduced length of the augmenting path (the sum
+     *         of every iteration's minDistance), or PRUNED as soon as
+     *         that running total reaches costBound.
      */
-    private int augmentRow(FastState st, int initialRow, int[] excludedCols1Idx, int costBound) {
+    private int augmentRow(FastState st, int initialRow, int[] excludedCols1Idx, long costBound) {
         int n = size;
         Arrays.fill(visitedColumn, 0, n + 1, false);
         Arrays.fill(distanceToColumn, 0, n + 1, Integer.MAX_VALUE);
 
+        int numFree = 0;
+        for (int column = 1; column <= n; column++) {
+            if (!isFixedColumn(st, column)) freeColumns[numFree++] = column;
+        }
+
         st.columnToRow[0] = initialRow;
         int closestColumn = 0;
-        int minDistance;
+        long total = 0;
 
         do {
             visitedColumn[closestColumn] = true;
             int row = st.columnToRow[closestColumn];
+            int[] costRow = costs[row - 1];
+            int rowPrice = st.rowPrice[row];
 
-            for (int column = 1; column <= n; column++) {
-                if (visitedColumn[column] || isFixedColumn(st, column)) continue;
-                int rawCost = costs[row - 1][column - 1];
+            for (int f = 0; f < numFree; f++) {
+                int column = freeColumns[f];
+                if (visitedColumn[column]) continue;
+                int rawCost = costRow[column - 1];
                 if (row == initialRow && isExcludedForRow(excludedCols1Idx, column)) rawCost = problem.infinity;
-                int reduced = rawCost - st.rowPrice[row] - st.colPrice[column];
+                int reduced = rawCost - rowPrice - st.colPrice[column];
                 if (reduced < distanceToColumn[column]) {
                     distanceToColumn[column] = reduced;
                     columnToLastColumn[column] = closestColumn;
                 }
             }
 
-            minDistance = Integer.MAX_VALUE;
+            int minDistance = Integer.MAX_VALUE;
             closestColumn = -1;
-            for (int column = 0; column <= n; column++) {
-                if (visitedColumn[column] || (column != 0 && isFixedColumn(st, column))) continue;
+            for (int f = 0; f < numFree; f++) {
+                int column = freeColumns[f];
+                if (visitedColumn[column]) continue;
                 if (distanceToColumn[column] < minDistance) {
                     minDistance = distanceToColumn[column];
                     closestColumn = column;
                 }
             }
 
-            if (minDistance > costBound) {
+            total += minDistance;
+            if (total >= costBound) {
                 return PRUNED;
             }
 
-            for (int column = 0; column <= n; column++) {
-                if (column != 0 && isFixedColumn(st, column)) continue;
+            // column 0 (the dummy) is always visited
+            st.rowPrice[st.columnToRow[0]] += minDistance;
+            st.colPrice[0] -= minDistance;
+            for (int f = 0; f < numFree; f++) {
+                int column = freeColumns[f];
                 if (visitedColumn[column]) {
                     st.rowPrice[st.columnToRow[column]] += minDistance;
                     st.colPrice[column] -= minDistance;
@@ -226,7 +277,7 @@ public class FastHungarian {
         } while (st.columnToRow[closestColumn] != 0);
 
         updateMatching(closestColumn, st);
-        return minDistance;
+        return (int) total;
     }
 
     private void updateMatching(int column, FastState st) {
@@ -243,11 +294,10 @@ public class FastHungarian {
 /**
  * The persistent, warm-startable state of one Murty-tree subproblem:
  * the current row/column dual prices, the current matching in both
- * directions, how many rows (a prefix, 1..fixedBoundary) are
- * permanently pinned to this state's assignment, and the total cost of
- * the full assignment. Copied (never mutated in place across nodes) so
- * that every Murty node owns an independent state it can safely use to
- * warm-start its own children.
+ * directions, which rows are permanently pinned to this state's
+ * assignment, and the total cost of the full assignment. Copied (never
+ * mutated in place across nodes) so that every Murty node owns an
+ * independent state it can safely use to warm-start its own children.
  */
 class FastState {
     final int size;
@@ -255,12 +305,11 @@ class FastState {
     final int[] colPrice;    // [0..size], index 0 unused
     final int[] columnToRow; // [0..size], columnToRow[j] = row assigned to column j, or 0 if free
     final int[] rowToColumn; // [0..size], rowToColumn[i] = column assigned to row i, or 0 if free
-    int fixedBoundary;       // rows 1..fixedBoundary are permanently fixed
+    int fixedBoundary;       // prefix mode: rows 1..fixedBoundary are permanently fixed
+    boolean[] fixedRow;      // set mode (non-null): fixedRow[i] true if 1-based row i is fixed.
+                             // Shared by reference on copy(); never mutated after being set.
     int cost;                // total cost of the full assignment, for THIS branch's specific fixed rows
-    int freeCost;            // cost of just the free (unfixed) rows' assignments -- a pure function
-                              // of the equivalence key (free columns + live exclusions), safe to
-                              // cache and reuse across any branch that reaches the same key,
-                              // regardless of which columns that branch's own fixed rows occupy
+    int freeCost;            // cost of just the free (unfixed) rows' assignments (cache use)
 
     FastState(int size) {
         this.size = size;
@@ -269,6 +318,7 @@ class FastState {
         this.columnToRow = new int[size + 1];
         this.rowToColumn = new int[size + 1];
         this.fixedBoundary = 0;
+        this.fixedRow = null;
         this.cost = 0;
     }
 
@@ -279,6 +329,7 @@ class FastState {
         System.arraycopy(columnToRow, 0, c.columnToRow, 0, size + 1);
         System.arraycopy(rowToColumn, 0, c.rowToColumn, 0, size + 1);
         c.fixedBoundary = fixedBoundary;
+        c.fixedRow = fixedRow;
         c.cost = cost;
         c.freeCost = freeCost;
         return c;
