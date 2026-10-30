@@ -1,4 +1,5 @@
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -100,8 +101,8 @@ public class FastCacheEnumerator {
                 // have already been folded in by earlier iterations below)
                 int fixedRowsCost = prefixCost;
 
-                long freeColumnsMask = computeFreeColumnsMask(newInclusions);
-                long freeRowsMask = computeFreeRowsMask(newInclusions);
+                BitSet freeColumnsMask = computeFreeColumnsMask(newInclusions);
+                BitSet freeRowsMask = computeFreeRowsMask(newInclusions);
                 Set<Long> liveExclusionKeys = computeLiveExclusionKeys(newExclusions, freeRowsMask);
                 FastSubproblemKey key = new FastSubproblemKey(freeColumnsMask, liveExclusionKeys);
 
@@ -197,16 +198,22 @@ public class FastCacheEnumerator {
      *         numCols &lt;= 64, true for any assignment problem this
      *         project's Hungarian solver can size arrays for anyway.
      */
-    private long computeFreeColumnsMask(List<int[]> inclusions) {
-        long mask = allOnes(this.problem.numCols);
-        for (int[] inc : inclusions) mask &= ~(1L << inc[1]);
+    private BitSet computeFreeColumnsMask(List<int[]> inclusions) {
+        BitSet mask = new BitSet(this.problem.numCols);
+        mask.set(0, this.problem.numCols);
+        for (int[] inc : inclusions) {
+            mask.clear(inc[1]);
+        }
         return mask;
     }
 
     /** @return a bitmask of rows NOT yet pinned down by any inclusion */
-    private long computeFreeRowsMask(List<int[]> inclusions) {
-        long mask = allOnes(this.problem.numRows);
-        for (int[] inc : inclusions) mask &= ~(1L << inc[0]);
+    private BitSet computeFreeRowsMask(List<int[]> inclusions) {
+        BitSet mask = new BitSet(this.problem.numRows);
+        mask.set(0, this.problem.numRows);
+        for (int[] inc : inclusions) {
+            mask.clear(inc[0]);
+        }
         return mask;
     }
 
@@ -215,10 +222,10 @@ public class FastCacheEnumerator {
     }
 
     /** @return live exclusions -- ones whose row is still free -- as an order-independent key */
-    private Set<Long> computeLiveExclusionKeys(List<int[]> exclusions, long freeRowsMask) {
+    private Set<Long> computeLiveExclusionKeys(List<int[]> exclusions, BitSet freeRowsMask) {
         Set<Long> keys = new HashSet<>();
         for (int[] exc : exclusions) {
-            if ((freeRowsMask & (1L << exc[0])) != 0) keys.add(encodePair(exc[0], exc[1]));
+            if (freeRowsMask.get(exc[0])) keys.add(encodePair(exc[0], exc[1]));
         }
         return keys;
     }
@@ -297,10 +304,10 @@ class FastMurtyNode extends MurtyNode {
  * dependency on MurtyCacheEnumerator.java being present.
  */
 class FastSubproblemKey {
-    final long freeColumnsMask;
+    final BitSet freeColumnsMask;
     final Set<Long> exclusions;
 
-    FastSubproblemKey(long freeColumnsMask, Set<Long> exclusions) {
+    FastSubproblemKey(BitSet freeColumnsMask, Set<Long> exclusions) {
         this.freeColumnsMask = freeColumnsMask;
         this.exclusions = exclusions;
     }
@@ -310,11 +317,11 @@ class FastSubproblemKey {
         if (this == o) return true;
         if (!(o instanceof FastSubproblemKey)) return false;
         FastSubproblemKey other = (FastSubproblemKey) o;
-        return this.freeColumnsMask == other.freeColumnsMask && this.exclusions.equals(other.exclusions);
+        return this.freeColumnsMask.equals(other.freeColumnsMask) && this.exclusions.equals(other.exclusions);
     }
 
     @Override
     public int hashCode() {
-        return 31 * Long.hashCode(freeColumnsMask) + exclusions.hashCode();
+        return 31 * freeColumnsMask.hashCode() + exclusions.hashCode();
     }
 }
