@@ -297,10 +297,10 @@ class FastMurtyNode extends MurtyNode {
  * dependency on MurtyCacheEnumerator.java being present.
  */
 class FastSubproblemKey {
-    final long freeColumnsMask;
+    final BitSet freeColumnsMask;
     final Set<Long> exclusions;
 
-    FastSubproblemKey(long freeColumnsMask, Set<Long> exclusions) {
+    FastSubproblemKey(BitSet freeColumnsMask, Set<Long> exclusions) {
         this.freeColumnsMask = freeColumnsMask;
         this.exclusions = exclusions;
     }

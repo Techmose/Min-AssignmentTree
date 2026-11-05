@@ -11,8 +11,7 @@ Put this next to compare_murty.py and your .java files, then run:
 
 Any run that cannot work for a given n is skipped with the reason
 printed, and shows as a gap in the plot:
-  - FastCacheEnumerator stores row/column sets in 64-bit masks, so it
-    is skipped for n > 64 (larger n would silently give wrong keys).
+  - A Java class listed in MAX_N is skipped above its limit.
   - Java is skipped if AssignmentProblem.infinity (sum of all costs + 1)
     would overflow an int.
   - fastmurty is skipped if the shifted costs reach its internal
@@ -32,8 +31,8 @@ import matplotlib.pyplot as plt
 
 from compare_murty import build_java, load_fastmurty, run_fastmurty
 
-JAVA_CLASSES = ["JavaFastmurty", "FastCacheEnumerator"]
-MAX_N = {"FastCacheEnumerator": 64}   # 64-bit masks
+JAVA_CLASSES = ["JavaFastmurty", "FastCacheEnumerator", "FastZobristCacheEnumerator"]
+MAX_N = {}   # class name -> largest n it supports (none limited now)
 INT_MAX = 2**31 - 1
 FASTMURTY_INF = 1e9
 
@@ -54,7 +53,7 @@ def run_java_timed(build_dir, matrix_path, k, repeats, timeout):
 
 def java_skip_reason(cls, n, C):
     if n > MAX_N.get(cls, n):
-        return f"n > {MAX_N[cls]} (64-bit masks)"
+        return f"n > {MAX_N[cls]} (MAX_N limit)"
     if int(C.sum()) + 1 > INT_MAX:
         return "sum of costs overflows int (AssignmentProblem.infinity)"
     return None
@@ -127,7 +126,7 @@ def plot(ns, times, title, path, log_x):
     plt.figure(figsize=(8, 5))
     for name, ts in times.items():
         if any(not math.isnan(t) for t in ts):
-            plt.plot(ns, ts, styles[name], label=labels[name])
+            plt.plot(ns, ts, styles.get(name, "D-"), label=labels.get(name, name + " (Java)"))
     plt.xlabel("n")
     plt.ylabel("enumeration time (s)")
     plt.yscale("log")
