@@ -6,7 +6,7 @@ import java.util.List;
  * assignment problem.  This algorithm is based on Murty's enumerator.
  *
  */
-public class MurtyEnumerator {
+public class MurtyEnumerator implements Enumerator{
     AssignmentProblem problem;
     Hungarian hungarian;
     // reusable space for cost matrix

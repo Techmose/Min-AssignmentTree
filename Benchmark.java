@@ -5,20 +5,21 @@ import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.function.Function;
 
 
 /**
- * Benchmark runner for OrderGraphEnumerator vs MurtyEnumerator.
+ * Benchmark runner for the top-k assignment enumerators.
  *
- * Configure runs by editing the three sections marked CONFIGURE below:
- *   1. N_VALUES      - matrix sizes to test
- *   2. K_VALUES      - solution counts to test (run for every N)
+ * Configure runs by editing the sections marked CONFIGURE below:
+ *   1. N_VALUES          - matrix sizes to test
+ *   2. K_VALUES          - solution counts to test (run for every N)
  *   3. SEED / COST_RANGE - matrix generation parameters
+ *   4. CONTENDERS        - which enumerators to run
  *
- * For every (n, k) pair the benchmark runs:
- *   OG_FFFF  - OrderGraph, all optimizations off (baseline)
- *   OG_FTFF  - OrderGraph, cache eviction on only
- *   MURTY    - Murty's algorithm
+ * For every (n, k) pair, every contender is run in order. The FIRST
+ * contender is the reference: every other contender's solution costs
+ * are sanity-checked against it.
  *
  * Output: benchmark_results.csv (appended), stdout summary table.
  */
@@ -32,11 +33,12 @@ public class Benchmark {
     static final int[] N_VALUES = buildNValues(MAX_N);
 
     static int[] buildNValues(int maxN) {
-        java.util.List<Integer> vals = new java.util.ArrayList<>();
+        List<Integer> vals = new ArrayList<>();
         for (int n = 10; n <= maxN; n += 10)
             vals.add(n);
         return vals.stream().mapToInt(Integer::intValue).toArray();
     }
+
     // =========================================================================
     // CONFIGURE: solution counts to benchmark (applied to every N above)
     // =========================================================================
@@ -47,6 +49,21 @@ public class Benchmark {
     // =========================================================================
     static final long SEED       = 42L;
     static final int  COST_RANGE = 999999;   // cell values drawn from [0, COST_RANGE)
+
+    // =========================================================================
+    // CONFIGURE: enumerators to run. First entry = reference for sanity checks.
+    // To add a new enumerator: make it implement Enumerator, add one line here.
+    // =========================================================================
+    static final List<Contender> CONTENDERS = List.of(
+        //new Contender("MURTY", MurtyEnumerator::new)
+        new Contender("FCM",   FastCacheEnumerator::new),
+        new Contender("JFM",   JavaFastmurty::new)
+        // new Contender("MURTY_OLD", MurtyEnumerator_OLD::new),
+        // new Contender("OGE",       OrderGraphEXPEnumerator::new),
+        // new Contender("OGE_OLD",   OrderGraphEXPEnumerator_OLD::new),
+        // new Contender("OG_TFFF",   p -> new OrderGraphEnumerator(p,
+        //         new EnumeratorConfig(true, false, false, LoggingMode.NONE)))
+    );
 
     // -------------------------------------------------------------------------
     // Fixed — output file
@@ -63,7 +80,6 @@ public class Benchmark {
         System.out.printf("K values: %s%n", arrayToString(K_VALUES));
         System.out.println();
 
-        // Open CSV writer once for the entire benchmark run
         boolean exists = new java.io.File(OUTPUT_FILE).exists();
         try (PrintWriter csv = new PrintWriter(
                 new BufferedWriter(new FileWriter(OUTPUT_FILE, true)))) {
@@ -81,52 +97,19 @@ public class Benchmark {
                 for (int k : K_VALUES) {
                     System.out.printf("  k=%-8d%n", k);
 
-                    // OrderGraphEXP
-                    //BenchmarkResult r1 = runOrderGraphEXP(problem, n, k);
-                    //writeCsvRow(csv, r1);
-                    //allResults.add(r1);
-                    //System.out.printf("    %-10s  %.4fs%n", r1.config, r1.timeNs * 1e-9);
-
-                    //BenchmarkResult r5 = runOrderGraphEXP_OLD(problem, n, k);
-                    //writeCsvRow(csv, r5);
-                    //allResults.add(r5);
-                    //System.out.printf("    %-10s  %.4fs%n", r5.config, r5.timeNs * 1e-9);
-
-                    // OG_TFFF — cache eviction on, everything else off
-                    //BenchmarkResult r2 = runOrderGraph(problem, n, k,
-                    //    new EnumeratorConfig(true, false, false, LoggingMode.NONE),
-                    //    "OG_TFFF");
-                    //writeCsvRow(csv, r2);
-                    //allResults.add(r2);
-                    //System.out.printf("    %-10s  %.4fs%n", r2.config, r2.timeNs * 1e-9);
-
-                    // Murty
-                    BenchmarkResult r3 = runMurty(problem, n, k);
-                    writeCsvRow(csv, r3);
-                    allResults.add(r3);
-                    System.out.printf("    %-10s  %.4fs%n", r3.config, r3.timeNs * 1e-9);
-
-                    //BenchmarkResult r4 = runMurtyOLD(problem, n, k);
-                    //writeCsvRow(csv, r4);
-                    //allResults.add(r4);
-                    //System.out.printf("    %-10s  %.4fs%n", r4.config, r4.timeNs * 1e-9);
-                    
-                    // Fast Murty Cache
-                    BenchmarkResult r5 = runFastCache(problem, n, k);
-                    writeCsvRow(csv, r5);
-                    allResults.add(r5);
-                    System.out.printf("    %-10s  %.4fs%n", r5.config, r5.timeNs * 1e-9);
-
-                    // Java Fast Murty
-                    BenchmarkResult r6 = runJavaFastMurty(problem, n, k);
-                    writeCsvRow(csv, r6);
-                    allResults.add(r6);
-                    System.out.printf("    %-10s  %.4fs%n", r6.config, r6.timeNs * 1e-9);
+                    List<BenchmarkResult> round = new ArrayList<>();
+                    for (Contender c : CONTENDERS) {
+                        BenchmarkResult r = run(c, problem, n, k);
+                        writeCsvRow(csv, r);
+                        allResults.add(r);
+                        round.add(r);
+                        System.out.printf("    %-10s  %.4fs%n", r.config, r.timeNs * 1e-9);
+                    }
 
                     System.out.println();
-                    //sanityCheck(r3, r1, "OGE vs MURTY");
-                    sanityCheck(r3, r5, "FastCache vs MURTY");
-                    sanityCheck(r3, r6, "JavaFastMurty vs MURTY");
+                    BenchmarkResult reference = round.get(0);
+                    for (BenchmarkResult r : round.subList(1, round.size()))
+                        sanityCheck(reference, r, r.config + " vs " + reference.config);
                 }
                 System.out.println();
             }
@@ -140,81 +123,20 @@ public class Benchmark {
     }
 
     // -------------------------------------------------------------------------
-    // Individual run methods — enumerator is nulled after timing to allow GC
+    // The one run method. Construction happens before the timer starts, same
+    // as the old per-enumerator methods; the enumerator goes out of scope
+    // before System.gc() so it can be collected.
     // -------------------------------------------------------------------------
 
-    static BenchmarkResult runOrderGraph(AssignmentProblem problem, int n, int k,
-                                         EnumeratorConfig config, String label) {
-        OrderGraphEnumerator og = new OrderGraphEnumerator(problem, config);
+    static BenchmarkResult run(Contender c, AssignmentProblem problem, int n, int k) {
+        Enumerator e = c.factory.apply(problem);
         long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = og.enumerate(k);
+        List<AssignmentSolution> solution = e.enumerate(k);
         long elapsed = System.nanoTime() - t0;
-        og = null;
+        e = null;
         System.gc();
-        return new BenchmarkResult(n, k, SEED, label, elapsed, solution);
+        return new BenchmarkResult(n, k, SEED, c.label, elapsed, solution);
     }
-
-    static BenchmarkResult runMurty(AssignmentProblem problem, int n, int k) {
-        MurtyEnumerator murty = new MurtyEnumerator(problem);
-        long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = murty.enumerate(k);
-        long elapsed = System.nanoTime() - t0;
-        murty = null;
-        System.gc();
-        return new BenchmarkResult(n, k, SEED, "MURTY", elapsed, solution);
-    }
-
-    static BenchmarkResult runMurtyOLD(AssignmentProblem problem, int n, int k) {
-        MurtyEnumerator_OLD murty = new MurtyEnumerator_OLD(problem);
-        long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = murty.enumerate(k);
-        long elapsed = System.nanoTime() - t0;
-        murty = null;
-        System.gc();
-        return new BenchmarkResult(n, k, SEED, "MURTY_OLD", elapsed, solution);
-    }
-
-
-    static BenchmarkResult runOrderGraphEXP(AssignmentProblem problem, int n, int k){
-        OrderGraphEXPEnumerator OGE = new OrderGraphEXPEnumerator(problem);
-        long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = OGE.enumerate(k);
-        long elapsed = System.nanoTime() - t0;
-        OGE = null;
-        System.gc();
-        return new BenchmarkResult(n, k, SEED,"OGE", elapsed, solution);
-    }
-
-    static BenchmarkResult runOrderGraphEXP_OLD(AssignmentProblem problem, int n, int k){
-        OrderGraphEXPEnumerator_OLD OGE = new OrderGraphEXPEnumerator_OLD(problem);
-        long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = OGE.enumerate(k);
-        long elapsed = System.nanoTime() - t0;
-        OGE = null;
-        System.gc();
-        return new BenchmarkResult(n, k, SEED,"OGE_OLD", elapsed, solution);
-    }
-
-    static BenchmarkResult runFastCache(AssignmentProblem problem, int n, int k){
-        FastCacheEnumerator FCM = new FastCacheEnumerator(problem);
-        long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = FCM.enumerate(k);
-        long elapsed = System.nanoTime() - t0;
-        FCM = null;
-        System.gc();
-        return new BenchmarkResult(n, k, SEED,"FCM", elapsed, solution);
-    }
-
-    static BenchmarkResult runJavaFastMurty(AssignmentProblem problem, int n, int k){
-        JavaFastmurty JFM = new JavaFastmurty(problem);
-        long t0 = System.nanoTime();
-        List<AssignmentSolution> solution = JFM.enumerate(k);
-        long elapsed = System.nanoTime() - t0;
-        JFM = null;
-        System.gc();
-        return new BenchmarkResult(n, k, SEED,"JFM", elapsed, solution);
-    }
-
 
     // -------------------------------------------------------------------------
     // Helpers
@@ -248,13 +170,9 @@ public class Benchmark {
     }
 
     static String arrayToString(int[] arr) {
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < arr.length; i++) {
-            if (i > 0) sb.append(", ");
-            sb.append(arr[i]);
-        }
-        return sb.append("]").toString();
+        return java.util.Arrays.toString(arr);
     }
+
     static void sanityCheck(BenchmarkResult r1, BenchmarkResult r2, String label) {
         boolean match = r1.solution.size() == r2.solution.size();
         if (match) {
@@ -264,13 +182,23 @@ public class Benchmark {
                     match = false;
                     break;
                 }
-
             }
-        }
-        else {
+        } else {
             System.out.println("Size mismatch: " + r1.solution.size() + " != " + r2.solution.size());
         }
         if (match) System.out.println("Sanity Check " + label);
+    }
+}
+
+
+/** A labelled way to build an enumerator for a given problem. */
+class Contender {
+    final String label;
+    final Function<AssignmentProblem, Enumerator> factory;
+
+    Contender(String label, Function<AssignmentProblem, Enumerator> factory) {
+        this.label   = label;
+        this.factory = factory;
     }
 }
 
@@ -285,11 +213,11 @@ class BenchmarkResult {
     final List<AssignmentSolution> solution;
 
     BenchmarkResult(int n, int k, long seed, String config, long timeNs, List<AssignmentSolution> solution) {
-        this.n      = n;
-        this.k      = k;
-        this.seed   = seed;
-        this.config = config;
-        this.timeNs = timeNs;
+        this.n        = n;
+        this.k        = k;
+        this.seed     = seed;
+        this.config   = config;
+        this.timeNs   = timeNs;
         this.solution = solution;
     }
 }

@@ -1,8 +1,9 @@
-
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
-import java.util.Random;
+import java.util.List;
 import jdk.jfr.*;
 
 // Custom marker event — shows up on JMC timeline
@@ -14,6 +15,14 @@ class AlgorithmEvent extends Event {
     @Label("K")         int k;
 }
 
+/**
+ * JFR-profiled benchmark. Every contender run is wrapped in an
+ * AlgorithmEvent labelled with the contender's name, n and k, so each
+ * run shows up as its own span on the JMC timeline.
+ *
+ * Uses the same Enumerator interface and Contender class as Benchmark.java
+ * (compile the two together).
+ */
 public class BenchmarkJFR {
 
     static final int   MAX_N       = 40;
@@ -21,6 +30,19 @@ public class BenchmarkJFR {
     static final int[] K_VALUES    = { 100000, 200000 };
     static final long  SEED        = 42L;
     static final int   COST_RANGE  = 999999; // restore realistic range
+
+    // =========================================================================
+    // CONFIGURE: enumerators to profile. Label = "Algorithm" field in JMC.
+    // =========================================================================
+    static final List<Contender> CONTENDERS = List.of(
+        new Contender("MURTY",      JavaFastmurty::new),
+        new Contender("FAST_CACHE", FastCacheEnumerator::new)
+        // new Contender("OTHER",   OrderGraphEXPEnumerator::new),
+        // new Contender("OG_FFFF", p -> new OrderGraphEnumerator(p,
+        //         new EnumeratorConfig(false, false, false, LoggingMode.NONE))),
+        // new Contender("OG_TFFF", p -> new OrderGraphEnumerator(p,
+        //         new EnumeratorConfig(true, false, false, LoggingMode.NONE)))
+    );
 
     static int[] buildNValues(int maxN) {
         java.util.List<Integer> vals = new java.util.ArrayList<>();
@@ -43,94 +65,39 @@ public class BenchmarkJFR {
         rec.start();
 
         for (int n : N_VALUES) {
-            int[][] matrix = randomMatrix(n, COST_RANGE, SEED);
+            int[][] matrix = Benchmark.randomMatrix(n, COST_RANGE, SEED);
             AssignmentProblem problem = new AssignmentProblem(matrix);
             System.out.printf("--- n=%d ---%n", n);
 
             for (int k : K_VALUES) {
                 System.out.printf("  k=%d%n", k);
-
-                // runOrderGraph(problem, n, k,
-                //     new EnumeratorConfig(false, false, false, LoggingMode.NONE), "OG_FFFF");
-
-                //runOrderGraph(problem, n, k,
-                //    new EnumeratorConfig(true, false, false, LoggingMode.NONE), "OG_TFFF");
-                
-                //runOther(problem, n, k);
-                runMurty(problem, n, k);
-                runFastCache(problem, n, k);
+                for (Contender c : CONTENDERS)
+                    run(c, problem, n, k);
             }
         }
 
         rec.stop();
-        rec.dump(Paths.get("JFR", "benchmark_full_" + System.currentTimeMillis() + ".jfr"));
+        Path dir = Paths.get("JFR");
+        Files.createDirectories(dir);   // dump() fails if the folder is missing
+        rec.dump(dir.resolve("benchmark_full_" + System.currentTimeMillis() + ".jfr"));
         rec.close();
     }
 
-    // static void runOrderGraph(AssignmentProblem problem, int n, int k,
-    //                           EnumeratorConfig config, String label) {
-    //     AlgorithmEvent e = new AlgorithmEvent();
-    //     e.algorithm = label;
-    //     e.n = n;
-    //     e.k = k;
-    //     e.begin();
-
-    //     OrderGraphEnumerator og = new OrderGraphEnumerator(problem, config);
-    //     og.enumerate(k);
-    //     og = null;
-
-    //     e.commit(); // marks end on timeline
-    // }
-
-    static void runMurty(AssignmentProblem problem, int n, int k) {
+    /**
+     * The one run method. Construction is inside the event span, same as
+     * the old per-enumerator methods, so JMC shows setup + enumeration.
+     */
+    static void run(Contender c, AssignmentProblem problem, int n, int k) {
         AlgorithmEvent e = new AlgorithmEvent();
-        e.algorithm = "MURTY";
+        e.algorithm = c.label;
         e.n = n;
         e.k = k;
         e.begin();
 
-        MurtyEnumerator murty = new MurtyEnumerator(problem);
-        murty.enumerate(k);
-        murty = null;
+        Enumerator enumerator = c.factory.apply(problem);
+        enumerator.enumerate(k);
+        enumerator = null;
 
-        e.commit();
-    }
-
-    static void runOther(AssignmentProblem problem, int n, int k) {
-        AlgorithmEvent e = new AlgorithmEvent();
-        e.algorithm = "OTHER";
-        e.n = n;
-        e.k = k;
-        e.begin();
-
-        OrderGraphEXPEnumerator other = new OrderGraphEXPEnumerator(problem);
-        other.enumerate(k);
-        other = null;
-
-        e.commit();
-    }
-
-    static void runFastCache(AssignmentProblem problem, int n, int k) {
-        AlgorithmEvent e = new AlgorithmEvent();
-        e.algorithm = "FAST_CACHE";
-        e.n = n;
-        e.k = k;
-        e.begin();
-
-        FastCacheEnumerator fastCache = new FastCacheEnumerator(problem);
-        fastCache.enumerate(k);
-        fastCache = null;
-
-        e.commit();
-    }
-
-
-    static int[][] randomMatrix(int n, int costRange, long seed) {
-        Random rng = new Random(seed);
-        int[][] m = new int[n][n];
-        for (int i = 0; i < n; i++)
-            for (int j = 0; j < n; j++)
-                m[i][j] = rng.nextInt(costRange);
-        return m;
+        e.commit(); // marks end on timeline
     }
 }

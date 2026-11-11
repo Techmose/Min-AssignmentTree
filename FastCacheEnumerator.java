@@ -1,263 +1,245 @@
 import java.util.ArrayList;
-import java.util.BitSet;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.SplittableRandom;
 
 /**
- * Enumerates the top-k solutions to an assignment problem using the
- * same tree-partitioning scheme as MurtyEnumerator/MurtyCacheEnumerator
+ * Same enumeration as FastCacheEnumerator / FastGraphCacheEnumerator (same
+ * partition, same incremental FastHungarian.solveStep, same equivalence:
+ * free columns F plus the columns E forbidden for the current row), but the
+ * cache key is a 64-bit Zobrist hash maintained incrementally, and the cache
+ * is an open-addressing table with no per-lookup allocation.
+ *
+ * Key identity
+ *   A subproblem is (S, E): S = columns fixed to rows [0, i) (the complement
+ *   of F, and |S| = i fixes the row), E = columns forbidden for row i.
+ *   hash(S, E) = XOR of zCol[c] for c in S  XOR  XOR of wCol[c] for c in E.
+ *
+ * Why this is cheap
+ *   - Child i+1 of a popped node fixes exactly one more column than child i,
+ *     so S's hash advances with one XOR and one bit set. The key costs O(1)
+ *     per child instead of building sets.
+ *   - For i > startPos, E is the single column cur[i]. Only the child at
+ *     i == startPos has a larger E, and that is one child per popped node.
+ *   - No inclusion/exclusion lists are copied per child; fixed rows are the
+ *     prefix of the node's own assignment.
+
+ *
+ * Works for any n (the S bitmap is a long[]).
  */
-public class FastCacheEnumerator {
+public class FastCacheEnumerator implements Enumerator {
     AssignmentProblem problem;
     FastHungarian solver;
+    final long[] zCol;   // random value per column: "this column is fixed"
+    final long[] wCol;   // independent random value per column: "forbidden for the current row"
+    final ZobristStateTable table = new ZobristStateTable();
 
-    // subproblem-equivalence cache: same notion as MurtyCacheEnumerator,
-    // but storing only the free submatrix's own cost + dual state 
-    Map<FastSubproblemKey, FastState> subproblemCache = new HashMap<>();
+    public boolean useCache = true;
+    public boolean skipTrivialInfeasible = true;
+    public boolean verify = true;
 
     // stats
     public int cacheHits = 0;
     public int cacheMisses = 0;
     public int prunedChildren = 0;
+    public int skippedInfeasible = 0;
     public int totalCalls = 0;
     public long totalTime = 0;
 
     public FastCacheEnumerator(AssignmentProblem problem) {
-        this.problem = problem;
-        this.solver = new FastHungarian(problem);
+        this(problem, 0x9E3779B97F4A7C15L);
     }
 
-    /**
-     * Enumerates the top-k solutions to the assignment problem.
-     * @param k The number of solutions to enumerate.
-     * @return A list of solutions to the assignment problem, best first.
-     */
+    /** @param seed fixed seed so runs are reproducible; any seed gives correct results */
+    public FastCacheEnumerator(AssignmentProblem problem, long seed) {
+        this.problem = problem;
+        this.solver = new FastHungarian(problem);
+        SplittableRandom rng = new SplittableRandom(seed);
+        int n = problem.numCols;
+        this.zCol = new long[n];
+        this.wCol = new long[n];
+        for (int c = 0; c < n; c++) {
+            zCol[c] = nonZero(rng);
+            wCol[c] = nonZero(rng);
+        }
+    }
+
+    private static long nonZero(SplittableRandom rng) {
+        long v;
+        do { v = rng.nextLong(); } while (v == 0L);
+        return v;
+    }
+
     public List<AssignmentSolution> enumerate(int k) {
         List<AssignmentSolution> topK = new ArrayList<>();
         MurtyQueue pq = new MurtyQueue(k);
         int[][] costMatrix = problem.costMatrix;
+        int n = problem.numRows;
+        long[] sBits = new long[(n + 63) >>> 6];   // columns fixed to rows [0, i); reused for every child
 
-        // root: fully solve from scratch, no fixed rows, no exclusions
         long startTime = System.nanoTime();
         FastState rootState = solver.solveFull();
         totalTime += System.nanoTime() - startTime;
         totalCalls++;
 
         AssignmentSolution rootSolution = new AssignmentSolution(rootState.assignmentZeroIndexed(), rootState.cost);
-        FastMurtyNode rootNode = new FastMurtyNode(rootSolution, new ArrayList<>(), new ArrayList<>(), rootState, true);
-        pq.qInsert(rootNode);
+        pq.qInsert(new FastZNode(rootSolution, rootState, true, 0, -1, null, 0L));
 
         while (topK.size() < k && !pq.isEmpty()) {
-            FastMurtyNode node = (FastMurtyNode) pq.qPopMin();
+            FastZNode node = (FastZNode) pq.qPopMin();
             topK.add(node.solution);
 
-            // A node whose state came from a cache hit was left UNMERGED
-            // at insertion time (see below) -- its state's fixed-row
-            // portion still belongs to whichever branch discovered that
-            // subproblem first. Only now, since this node was actually
-            // chosen to be split into children, do we pay for merging in
-            // THIS branch's own fixed-row assignment. Most inserted
-            // candidates are later discarded or evicted by qReplaceMax
-            // without ever being popped, so this defers -- and for the
-            // majority of hits, entirely avoids -- that merge cost.
+            int[] cur = node.solution.assignment;
+            int startPos = node.startPos;
+
+            // A cache-hit child carries the state of whichever branch solved that
+            // subproblem first; fix its fixed rows only if it is actually popped.
             FastState nodeState = node.state;
             if (!node.merged) {
-                nodeState = mergeFixedRows(nodeState, node.inclusions, node.inclusions.size(), node.solution.cost);
+                nodeState = mergeFixedRows(nodeState, cur, startPos, node.solution.cost);
                 node.state = nodeState;
                 node.merged = true;
             }
 
-            int[] currentAssignment = node.solution.assignment;
-            int n = currentAssignment.length;
-
-            int startPos = 0;
-            for (int[] inc : node.inclusions) {
-                startPos = Math.max(startPos, inc[0] + 1);
-            }
-
-            // running total of costs[j][currentAssignment[j]] for j in
-            // [0, startPos) -- the cost this whole popped node's fixed
-            // prefix already contributes, before any of ITS children add
-            // one more fixed row. Extended by one row per loop iteration
-            // below rather than resummed from scratch each time.
+            // S for rows [0, startPos): bitmap, hash and cost, built once per popped node
+            Arrays.fill(sBits, 0L);
+            long sHash = 0L;
             int prefixCost = 0;
             for (int j = 0; j < startPos; j++) {
-                prefixCost += costMatrix[j][currentAssignment[j]];
+                int col = cur[j];
+                sBits[col >>> 6] |= 1L << col;
+                sHash ^= zCol[col];
+                prefixCost += costMatrix[j][col];
             }
 
-            for (int i = startPos; i < n; i++) {
-                List<int[]> newInclusions = new ArrayList<>(node.inclusions);
-                for (int j = startPos; j < i; j++) {
-                    newInclusions.add(new int[]{j, currentAssignment[j]});
+            // the last row's child always has E == F (one free column, forbidden)
+            int end = n;
+            if (skipTrivialInfeasible && startPos <= n - 1) {
+                end = n - 1;
+                skippedInfeasible++;
+            }
+
+            boolean nodeHasExclusions = node.exclCol >= 0 || node.exclMulti != null;
+
+            for (int i = startPos; i < end; i++) {
+                if (i > startPos) {
+                    // child i fixes one more column than child i-1: one XOR, one bit
+                    int pc = cur[i - 1];
+                    prefixCost += costMatrix[i - 1][pc];
+                    sBits[pc >>> 6] |= 1L << pc;
+                    sHash ^= zCol[pc];
                 }
-                List<int[]> newExclusions = new ArrayList<>(node.exclusions);
-                newExclusions.add(new int[]{i, currentAssignment[i]});
+                int c = cur[i];
 
-                // fixedRowsCost = cost of rows [0, i), i.e. prefixCost as
-                // it stands at the top of this iteration (rows [startPos, i)
-                // have already been folded in by earlier iterations below)
-                int fixedRowsCost = prefixCost;
+                // forbidden columns for row i in this child
+                boolean multi = (i == startPos) && nodeHasExclusions;
+                int[] childExcl = null;
+                long eHash;
+                int childExclCount;
+                if (multi) {
+                    int[] base = node.exclMulti != null ? node.exclMulti : new int[]{node.exclCol};
+                    childExcl = insertSorted(base, c);
+                    eHash = node.exclHash ^ wCol[c];
+                    childExclCount = childExcl.length;
+                } else {
+                    eHash = wCol[c];
+                    childExclCount = 1;
+                }
 
-                BitSet freeColumnsMask = computeFreeColumnsMask(newInclusions);
-                BitSet freeRowsMask = computeFreeRowsMask(newInclusions);
-                Set<Long> liveExclusionKeys = computeLiveExclusionKeys(newExclusions, freeRowsMask);
-                FastSubproblemKey key = new FastSubproblemKey(freeColumnsMask, liveExclusionKeys);
+                if (skipTrivialInfeasible && childExclCount >= n - i) {
+                    skippedInfeasible++;
+                    continue;
+                }
 
-                FastState childState = subproblemCache.get(key);
+                long h = sHash ^ eHash;
+                ZobristStateTable.Entry hit = null;
+                if (useCache) hit = table.find(h, sBits, multi ? -1 : c, childExcl, verify);
+
+                FastState childState;
                 int childTotalCost;
                 boolean childMerged;
                 int[] childAssignment;
-                if (childState != null) {
+                if (hit != null) {
                     cacheHits++;
-                    // Reuse the cached free-submatrix solve as-is
-                    
-                    childTotalCost = fixedRowsCost + childState.freeCost;
-                    childAssignment = buildHitAssignment(newInclusions, childState);
+                    childState = hit.state;
+                    childTotalCost = prefixCost + childState.freeCost;
+                    childAssignment = buildHitAssignment(cur, i, childState);
                     childMerged = false;
                 } else {
                     cacheMisses++;
                     int costBound = pq.isFull() ? pq.peekMax().solution.cost - node.solution.cost : problem.infinity;
-
-                    // every column ever excluded for row i along this whole
-                    // ancestor chain (there can be more than one -- the same
-                    // row can be excluded again in a deeper descendant, once
-                    // re-matched to a new column) must stay permanently
-                    // blocked, not just the newest one
-                    List<Integer> excludedForRow = new ArrayList<>();
-                    for (int[] exc : newExclusions) {
-                        if (exc[0] == i) excludedForRow.add(exc[1]);
-                    }
-                    int[] excludedCols = new int[excludedForRow.size()];
-                    for (int idx = 0; idx < excludedCols.length; idx++) excludedCols[idx] = excludedForRow.get(idx);
+                    int[] excludedCols = multi ? childExcl : new int[]{c};
 
                     long stepStart = System.nanoTime();
-                    childState = solver.solveStep(nodeState, i, excludedCols, i, fixedRowsCost, costBound);
+                    childState = solver.solveStep(nodeState, i, excludedCols, i, prefixCost, costBound);
                     totalTime += System.nanoTime() - stepStart;
                     totalCalls++;
 
                     if (childState == null) {
                         prunedChildren++;
-                        prefixCost += costMatrix[i][currentAssignment[i]];
-                        continue; // infeasible, or provably worse than the current worst kept solution
+                        continue;
                     }
-                    subproblemCache.put(key, childState);
+                    if (useCache) {
+                        table.put(new ZobristStateTable.Entry(h, sBits.clone(), multi ? -1 : c, childExcl, childState));
+                    }
                     childTotalCost = childState.cost;
                     childAssignment = childState.assignmentZeroIndexed();
-                    childMerged = true; // solveStep's result is already fully branch-specific
+                    childMerged = true;
                 }
 
-                if (childTotalCost >= problem.infinity) {
-                    prefixCost += costMatrix[i][currentAssignment[i]];
-                    continue;
-                }
+                if (childTotalCost >= problem.infinity) continue;
 
                 AssignmentSolution childSolution = new AssignmentSolution(childAssignment, childTotalCost);
-                FastMurtyNode child = new FastMurtyNode(childSolution, newExclusions, newInclusions, childState, childMerged);
+                FastZNode child = multi
+                    ? new FastZNode(childSolution, childState, childMerged, i, -1, childExcl, eHash)
+                    : new FastZNode(childSolution, childState, childMerged, i, c, null, eHash);
 
                 if (pq.size() < k) {
                     pq.qInsert(child);
                 } else if (childSolution.cost < pq.peekMax().solution.cost) {
                     pq.qReplaceMax(child);
                 }
-                // else: child is discarded -- worse than everything already kept
-
-                prefixCost += costMatrix[i][currentAssignment[i]];
             }
         }
         printStats();
         return topK;
     }
 
-    /**
-     * Builds just the reported assignment array for a cache-hit child --
-     * fixed rows from this branch's own newInclusions, free rows read
-     * straight from the cached (unmerged, still someone-else's-branch)
-     * state. Far cheaper than cloning and merging the full FastState,
-     * and it's all a cache hit needs unless it's later popped.
-     */
-    private int[] buildHitAssignment(List<int[]> newInclusions, FastState cachedFreeState) {
-        int n = cachedFreeState.size;
-        int[] assignment = new int[n];
-        for (int row = 1; row <= n; row++) {
-            assignment[row - 1] = cachedFreeState.rowToColumn[row] - 1;
+    private static int[] insertSorted(int[] sorted, int v) {
+        int[] out = new int[sorted.length + 1];
+        int p = 0;
+        while (p < sorted.length && sorted[p] < v) {
+            out[p] = sorted[p];
+            p++;
         }
-        for (int[] inc : newInclusions) {
-            assignment[inc[0]] = inc[1];
+        out[p] = v;
+        System.arraycopy(sorted, p, out, p + 1, sorted.length - p);
+        return out;
+    }
+
+    /** Reported assignment for a cache-hit child: rows [0, i) from the popped node, the rest from the cached solve. */
+    private int[] buildHitAssignment(int[] cur, int i, FastState cached) {
+        int n = cached.size;
+        int[] assignment = new int[n];
+        System.arraycopy(cur, 0, assignment, 0, i);
+        for (int row = i + 1; row <= n; row++) {
+            assignment[row - 1] = cached.rowToColumn[row] - 1;
         }
         return assignment;
     }
 
-    /**
-     * @return a bitmask of columns NOT yet pinned down by any inclusion
-     *         (bit j set means column j is free). Cheaper than a
-     *         HashSet&lt;Integer&gt; -- no boxing, O(1)-ish equals/hashCode
-     *         for the resulting cache key -- and fine as long as
-     *         numCols &lt;= 64, true for any assignment problem this
-     *         project's Hungarian solver can size arrays for anyway.
-     */
-    private BitSet computeFreeColumnsMask(List<int[]> inclusions) {
-        BitSet mask = new BitSet(this.problem.numCols);
-        mask.set(0, this.problem.numCols);
-        for (int[] inc : inclusions) {
-            mask.clear(inc[1]);
-        }
-        return mask;
-    }
-
-    /** @return a bitmask of rows NOT yet pinned down by any inclusion */
-    private BitSet computeFreeRowsMask(List<int[]> inclusions) {
-        BitSet mask = new BitSet(this.problem.numRows);
-        mask.set(0, this.problem.numRows);
-        for (int[] inc : inclusions) {
-            mask.clear(inc[0]);
-        }
-        return mask;
-    }
-
-    private long allOnes(int bits) {
-        return bits >= 64 ? -1L : (1L << bits) - 1;
-    }
-
-    /** @return live exclusions -- ones whose row is still free -- as an order-independent key */
-    private Set<Long> computeLiveExclusionKeys(List<int[]> exclusions, BitSet freeRowsMask) {
-        Set<Long> keys = new HashSet<>();
-        for (int[] exc : exclusions) {
-            if (freeRowsMask.get(exc[0])) keys.add(encodePair(exc[0], exc[1]));
-        }
-        return keys;
-    }
-
-    private long encodePair(int row, int col) {
-        return (long) row * this.problem.numCols + col;
-    }
-
-    /**
-     * Overwrites the fixed-row portion of a cached free-submatrix
-     * solution with THIS branch's own fixed-row assignment (from
-     * inclusions) so the resulting state is ready to warm-start THIS
-     * branch's own children via solveStep. Called lazily, only once a
-     * cache-hit-sourced node is actually popped for splitting (see
-     * enumerate()) -- not at insertion time, since most inserted
-     * candidates are discarded or evicted without ever needing this. The
-     * free portion's dual state and cost are already correct as cached
-     * and untouched; totalCost is supplied by the caller (already known
-     * cheaply), so no matrix-wide recomputation happens here.
-     */
-    private FastState mergeFixedRows(FastState cached, List<int[]> inclusions, int fixedBoundaryZeroIdx, int totalCost) {
+    /** Overwrites a cached state's fixed rows [0, startPos) with this branch's own. */
+    private FastState mergeFixedRows(FastState cached, int[] cur, int startPos, int totalCost) {
         FastState merged = cached.copy();
-        for (int[] inc : inclusions) {
-            int row = inc[0] + 1;
-            int col = inc[1] + 1;
+        for (int j = 0; j < startPos; j++) {
+            int row = j + 1;
+            int col = cur[j] + 1;
             merged.rowToColumn[row] = col;
             merged.columnToRow[col] = row;
         }
-        merged.fixedBoundary = fixedBoundaryZeroIdx;
+        merged.fixedBoundary = startPos;
         merged.cost = totalCost;
-        // merged.freeCost is left as cached.freeCost -- correct and
-        // unaffected by which branch's fixed rows now sit alongside it
         return merged;
     }
 
@@ -265,63 +247,117 @@ public class FastCacheEnumerator {
         System.out.printf("cache hits: %d%n", cacheHits);
         System.out.printf("cache misses: %d%n", cacheMisses);
         System.out.printf("pruned children: %d%n", prunedChildren);
-        System.out.printf("hungarian/incremental solves: %d, total time: %.4fs%n", totalCalls, totalTime * 1e-9);
+        System.out.printf("skipped (trivially infeasible): %d%n", skippedInfeasible);
+        System.out.printf("table: %d entries, %.2f slots probed per lookup, 64-bit hash collisions caught by verify: %d%n",
+            table.size(), table.lookups == 0 ? 0.0 : (double) table.probes / table.lookups, table.hashCollisions);
+        System.out.printf("incremental solves: %d, total time: %.4fs%n", totalCalls, totalTime * 1e-9);
     }
 }
 
 /**
- * MurtyNode carries no field for this enumerator's extra per-node dual
- * state, and MurtyQueue is hardcoded to the concrete MurtyNode type --
- * but MurtyNode isn't final, so subclassing it lets every MurtyQueue
- * method (qInsert/qPopMin/qReplaceMax/peekMax) accept a FastMurtyNode
- * exactly like any other MurtyNode, with no change to MurtyNode.java or
- * MurtyQueue.java, and no separate identity map to maintain.
- *
- * `merged` is false exactly when `state` is a cache hit's raw,
- * unmerged free-submatrix state (still belongs to whichever branch
- * discovered that subproblem first). It's true for the root, for any solveStep-produced (cache
- * miss) state, and for any cache-hit state that has already been
- * merged because this node was popped once already.
+ * Open-addressing table (linear probing, load factor at most 0.5) keyed by a
+ * 64-bit hash. An entry also stores the exact key (S bitmap and E) so a match
+ * can be verified without rebuilding anything.
  */
-class FastMurtyNode extends MurtyNode {
+final class ZobristStateTable {
+    static final class Entry {
+        final long hash;
+        final long[] sBits;     // columns fixed to rows [0, i); never mutated
+        final int exclCol;      // single forbidden column, or -1 when exclMulti is used
+        final int[] exclMulti;  // sorted forbidden columns when there are two or more, else null
+        final FastState state;
+
+        Entry(long hash, long[] sBits, int exclCol, int[] exclMulti, FastState state) {
+            this.hash = hash;
+            this.sBits = sBits;
+            this.exclCol = exclCol;
+            this.exclMulti = exclMulti;
+            this.state = state;
+        }
+    }
+
+    private Entry[] slots = new Entry[1 << 12];
+    private int mask = slots.length - 1;
+    private int size;
+
+    long lookups;
+    long probes;
+    long hashCollisions;   // equal 64-bit hash but different key (only detectable when verifying)
+
+    int size() { return size; }
+
+    private int index(long h) {
+        return (int) (h ^ (h >>> 32)) & mask;
+    }
+
+    Entry find(long h, long[] sBits, int exclCol, int[] exclMulti, boolean verify) {
+        lookups++;
+        int idx = index(h);
+        Entry e;
+        while ((e = slots[idx]) != null) {
+            probes++;
+            if (e.hash == h) {
+                if (!verify
+                    || (e.exclCol == exclCol && Arrays.equals(e.sBits, sBits) && Arrays.equals(e.exclMulti, exclMulti))) {
+                    return e;
+                }
+                hashCollisions++;
+            }
+            idx = (idx + 1) & mask;
+        }
+        probes++;
+        return null;
+    }
+
+    void put(Entry e) {
+        if ((size + 1) * 2 > slots.length) grow();
+        insert(slots, mask, e);
+        size++;
+    }
+
+    private void insert(Entry[] arr, int m, Entry e) {
+        int idx = (int) (e.hash ^ (e.hash >>> 32)) & m;
+        while (arr[idx] != null) idx = (idx + 1) & m;
+        arr[idx] = e;
+    }
+
+    private void grow() {
+        Entry[] bigger = new Entry[slots.length << 1];
+        int newMask = bigger.length - 1;
+        for (Entry e : slots) {
+            if (e != null) insert(bigger, newMask, e);
+        }
+        slots = bigger;
+        mask = newMask;
+    }
+}
+
+/**
+ * Queue node carrying the warm-start state and this subproblem's exclusions.
+ * MurtyNode's inclusion/exclusion lists are left empty: fixed rows are the
+ * prefix of solution.assignment.
+ *
+ *  startPos   number of fixed rows; also the one row that carries exclusions
+ *  exclCol    the single forbidden column for row startPos, or -1 (root, or exclMulti used)
+ *  exclMulti  sorted forbidden columns when there are two or more, else null; never mutated
+ *  exclHash   XOR of wCol over the forbidden columns
+ */
+class FastZNode extends MurtyNode {
     FastState state;
     boolean merged;
+    final int startPos;
+    final int exclCol;
+    final int[] exclMulti;
+    final long exclHash;
 
-    FastMurtyNode(AssignmentSolution solution, List<int[]> exclusions, List<int[]> inclusions, FastState state, boolean merged) {
-        super(solution, exclusions, inclusions);
+    FastZNode(AssignmentSolution solution, FastState state, boolean merged,
+              int startPos, int exclCol, int[] exclMulti, long exclHash) {
+        super(solution, Collections.<int[]>emptyList(), Collections.<int[]>emptyList());
         this.state = state;
         this.merged = merged;
-    }
-}
-
-/**
- * Equivalence key for a Murty tree node's induced subproblem: the set
- * of free (unforced) columns, together with the LIVE (row,col) cells
- * excluded on still-free rows. Two nodes with equal keys are guaranteed
- * to induce the identical constrained matrix -- see
- * MurtyCacheEnumerator.SubproblemKey for the original reference version
- * of this idea; this is a standalone copy so this file has no
- * dependency on MurtyCacheEnumerator.java being present.
- */
-class FastSubproblemKey {
-    final BitSet freeColumnsMask;
-    final Set<Long> exclusions;
-
-    FastSubproblemKey(BitSet freeColumnsMask, Set<Long> exclusions) {
-        this.freeColumnsMask = freeColumnsMask;
-        this.exclusions = exclusions;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof FastSubproblemKey)) return false;
-        FastSubproblemKey other = (FastSubproblemKey) o;
-        return this.freeColumnsMask.equals(other.freeColumnsMask) && this.exclusions.equals(other.exclusions);
-    }
-
-    @Override
-    public int hashCode() {
-        return 31 * freeColumnsMask.hashCode() + exclusions.hashCode();
+        this.startPos = startPos;
+        this.exclCol = exclCol;
+        this.exclMulti = exclMulti;
+        this.exclHash = exclHash;
     }
 }

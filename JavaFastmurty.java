@@ -39,7 +39,7 @@ import java.util.List;
  * the cost/benefit of caching; comparing this against fastmurty (C)
  * checks FastHungarian and the Java overhead.
  */
-public class JavaFastmurty {
+public class JavaFastmurty implements Enumerator{
     AssignmentProblem problem;
     FastHungarian solver;
 
